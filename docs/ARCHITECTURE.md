@@ -7,55 +7,78 @@
 | **Version** | 1.0.0 |
 | **Platform** | SAP Business Technology Platform (BTP), Cloud Foundry runtime |
 | **Framework** | SAP Cloud Application Programming Model (CAP), Node.js |
-| **Last Updated** | July 16, 2026 |
+| **Delivery model** | Multitenant SaaS — customers subscribe from their own BTP subaccounts |
+| **Last Updated** | July 19, 2026 |
 
 ---
 
-## 1. Purpose & Overview
+## 1. Purpose & Overview (What & Why)
 
-This application acts as an **integration bridge between SAP SuccessFactors and DocuSign**. Its primary goal is to trigger a **DocuSign Maestro (Agreement Orchestration) workflow** automatically when an employee lifecycle event (e.g. a "hire") occurs in SuccessFactors.
+This application is a **multitenant SaaS bridge between SAP SuccessFactors and DocuSign**. It lets an HR/administrator connect their DocuSign account once, and then trigger a **DocuSign Maestro (Agreement Orchestration) workflow** automatically whenever an event happens in SuccessFactors (e.g. a new hire) — without writing any code.
 
-The application solves two problems:
+### The two goals we set out to achieve
 
-1. **Authentication & Authorization** — It provides a self-service UI where an administrator connects the app to a DocuSign account. Instead of shipping hardcoded secrets, the admin generates their own **Client ID / Client Secret** in the DocuSign OAuth registry, pastes them into the app, and completes an **OAuth 2.0 Authorization Code Grant** login. The resulting access/refresh tokens are stored server-side.
+1. **Login & store an access token (self-service connect).**
+   Each customer connects the app to their own DocuSign account through a guided UI. Instead of shipping hardcoded secrets, the admin brings their **own Client ID / Client Secret** from the DocuSign OAuth registry and completes an **OAuth 2.0 Authorization Code Grant** login. The app stores the resulting **access + refresh tokens** securely, per customer.
 
-2. **Event-driven workflow triggering** — It exposes a **public, unauthenticated webhook** (`triggerMaestroWorkflow`) that SAP SuccessFactors **Integration Center** calls on any event. On every call the webhook **refreshes the DocuSign access token** (using the stored refresh token) and then triggers the correct Maestro workflow for the given account.
+2. **Provide a ready-to-use Maestro trigger URL for Integration Center.**
+   The app gives each customer a **unique webhook URL** (shown in the UI, copy-ready). The customer pastes it into **SuccessFactors Integration Center** as an outbound REST call. When SuccessFactors fires an event, it calls that URL, and the app triggers the correct Maestro workflow **using that customer's own DocuSign token**.
+
+### Who uses it (personas)
+
+| Persona | What they do |
+|---|---|
+| **Provider (us)** | Build, deploy, and operate the single SaaS app on BTP. |
+| **Customer admin** | Subscribes to the app, connects DocuSign, copies the trigger URL. |
+| **SuccessFactors (system)** | Calls the trigger URL automatically on HR events. |
+
+### Why SaaS / multitenant
+
+The app is deployed **once** by us (the provider). Many SuccessFactors customers **subscribe** from their own BTP subaccounts. Each subscriber is an **isolated tenant** with its **own database container** — so one customer never sees another's DocuSign tokens or configuration.
 
 ---
 
-## 2. High-Level Architecture
+## 2. High-Level Architecture (How it fits together)
+
+We deploy **one** SaaS app. Each customer **subscribes** from their own subaccount and gets an isolated database container. All UI/API traffic flows through the App Router; SuccessFactors calls the public tenant-specific webhook.
 
 ```
-                        ┌──────────────────────────────────────────────────────────┐
-                        │                    SAP BTP – Cloud Foundry                 │
-                        │                                                            │
-  ┌──────────┐   HTTPS  │   ┌───────────────────┐        ┌──────────────────────┐   │
-  │  Admin    │────────▶│   │  App Router        │  /api  │  CAP Node.js Service │   │
-  │ (Browser) │  UI/API │   │ (approuter.nodejs) │───────▶│  (docusign-sf-       │   │
-  └──────────┘         │   │                    │        │   integration-srv)   │   │
-                        │   │  - /index.html     │        │                      │   │
-                        │   │  - /callback.html  │  /web- │  IntegrationService  │   │
-                        │   │  - /configure.html │  hook  │  (protected /api)    │   │
-  ┌──────────────┐      │   │  - /home.html      │───────▶│  WebhookService      │   │
-  │ SAP Success- │ POST │   │                    │        │  (public /webhook)   │   │
-  │  Factors     │──────┼──▶│  /webhook (none)   │        │                      │   │
-  │ Integration  │      │   └─────────┬──────────┘        │  In-memory SQLite DB │   │
-  │  Center      │      │             │ xsuaa auth        └──────────┬───────────┘   │
-  └──────────────┘      │             ▼                              │               │
-                        │      ┌──────────────┐                      │               │
-                        │      │  XSUAA (IAS) │                      │               │
-                        │      └──────────────┘                      │               │
-                        └────────────────────────────────────────────┼──────────────┘
-                                                                      │ HTTPS
-                                                                      ▼
-                                                        ┌──────────────────────────┐
-                                                        │        DocuSign          │
-                                                        │  - OAuth Registry (apps) │
-                                                        │  - Auth Server (account) │
-                                                        │  - Maestro / partner-    │
-                                                        │    integrations API      │
-                                                        └──────────────────────────┘
+   CUSTOMER A subaccount          CUSTOMER B subaccount        (each subscribes once)
+          │  subscribe                    │  subscribe
+          ▼                               ▼
+ ┌───────────────────────────────────────────────────────────────────────────┐
+ │                     SAP BTP – Cloud Foundry  (Provider)                     │
+ │                                                                            │
+ │   ┌──────────────────┐        ┌───────────────────────┐                    │
+ │   │   App Router      │  /api  │  CAP Backend (srv)    │                    │
+ │   │ (approuter.nodejs)│───────▶│  IntegrationService   │   per-tenant       │
+ │   │  - UI (*.html)    │        │   (protected /api)    │   data access      │
+ │   │  - /api  (xsuaa)  │  /web- │  Webhook route        │──────┐             │
+ │   │  - /webhook (none)│  hook  │  (tenant-aware)       │      │             │
+ │   └───────┬──────────┘        └───────────────────────┘      ▼             │
+ │           │ xsuaa (shared)                              ┌───────────────┐   │
+ │           ▼                    ┌───────────────────┐    │  SAP HANA     │   │
+ │   ┌──────────────┐             │  MTX Sidecar      │    │  Cloud        │   │
+ │   │    XSUAA     │             │ (onboards tenants,│───▶│  ┌─────────┐  │   │
+ │   └──────────────┘             │  provisions HDI)  │    │  │ HDI: A  │  │   │
+ │           ▲                    └─────────┬─────────┘    │  ├─────────┤  │   │
+ │           │                              │              │  │ HDI: B  │  │   │
+ │   ┌───────┴────────┐            ┌─────────▼────────┐    │  └─────────┘  │   │
+ │   │ SaaS Registry  │◀──────────▶│  Service Manager │    └───────────────┘   │
+ │   │ (marketplace)  │            │ (creates HDI/    │     one isolated       │
+ │   └────────────────┘            │  tenant)         │     container/tenant   │
+ │                                 └──────────────────┘                        │
+ └───────────────────────────────────────────────┬───────────────────────────┘
+                                                  │ HTTPS (per-tenant token)
+   ┌──────────────┐  POST /webhook/tenant/<id>/…  ▼
+   │ SAP Success- │───────────────────────────▶ (App Router → Backend)   ┌──────────┐
+   │  Factors     │   (configured in                                     │ DocuSign │
+   │ Integration  │    Integration Center)                               │ (OAuth + │
+   │  Center      │                                                      │  Maestro)│
+   └──────────────┘                                                      └──────────┘
 ```
+
+**In one line:** the App Router serves the UI and forwards traffic; the CAP backend holds the business logic; the MTX sidecar + Service Manager give each subscriber its own HANA HDI container; the SaaS Registry makes the app subscribable; XSUAA secures it.
 
 ---
 
@@ -64,15 +87,18 @@ The application solves two problems:
 ### 3.1 App Router (`docusign-sf-integration-approuter`)
 - Type: `approuter.nodejs`, path `app/router`.
 - Serves the static admin UI (`index.html`, `callback.html`, `configure.html`, `home.html`) from `resources/`.
+- Uses a **short custom host** (`dsf-b67584fctrial`) so per-tenant subscription URLs stay within the DNS 63-character limit.
 - Route configuration (`xs-app.json`):
 
 | Route | Auth | Purpose |
 |---|---|---|
-| `^/webhook/(.*)$` | **none** | Public endpoint for SuccessFactors → `WebhookService`. CSRF disabled. |
+| `^/-/cds/.*` | **none** | MTX sidecar endpoints (tenant onboarding callbacks). |
+| `^/webhook/(.*)$` | **none** | Public endpoint for SuccessFactors → tenant-aware webhook. CSRF disabled. |
 | `^/api/(.*)$` | **xsuaa** | Protected OData/actions → `IntegrationService`. Auth token forwarded to backend. |
 | `^/(.*)$` | **xsuaa** | Static UI assets. |
 
-- `forwardAuthToken: true` on the `srv-api` destination ensures the user's JWT reaches the backend for protected routes.
+- `TENANT_HOST_PATTERN` lets the App Router identify the calling tenant from the subscription subdomain.
+- `forwardAuthToken: true` on the `srv-api` destination ensures the user's JWT (with tenant info) reaches the backend for protected routes.
 
 ### 3.2 CAP Backend (`docusign-sf-integration-srv`)
 - Type: `nodejs`, path `gen/srv` (built from `srv/`).
@@ -85,15 +111,25 @@ Requires an authenticated user (XSUAA). Handles all admin/setup operations.
 |---|---|---|
 | `Tokens`, `Users`, `Config` | Entities (projections) | Read access to stored state. |
 | `exchangeToken(code)` | Function | Exchanges the OAuth authorization code for DocuSign tokens (auth-code grant), stores tokens + user profile. |
+| `getTenantId()` | Function | Returns the caller's tenant (subscriber) ID so the UI can build the tenant-specific webhook URL. |
 | `saveAppConfig(...)` | Action | Persists environment, auth server, Client ID, Client Secret, and selected Account ID. |
 | `logout()` | Action | Wipes all tokens, user info, and config. |
 
-#### `WebhookService` — public, `@path: '/webhook'`, `@requires: 'any'`
-Intentionally unauthenticated. Kept as a **separate service** because CAP enforces `authenticated-user` at the service-router level; a per-action annotation inside a protected service is never reached. Only non-sensitive, event-driven operations live here.
+#### `WebhookService` + tenant-aware webhook route — public, unauthenticated
+SuccessFactors Integration Center calls an **unauthenticated** endpoint, so it carries no login/tenant token. To still target the right subscriber, the app exposes a **tenant-aware webhook** whose URL contains the tenant ID:
+
+```
+POST /webhook/tenant/<tenantId>/trigger
+```
+
+The handler runs the trigger logic inside that tenant's context (`cds.tx({ tenant })`), so it reads **that customer's** DocuSign token/config from **their** HDI container and triggers Maestro on their behalf.
 
 | Operation | Type | Description |
 |---|---|---|
-| `triggerMaestroWorkflow(data)` | Action | Called by SuccessFactors on any event. `data` is an open object: `workflowId` is required, every other property is forwarded to the Maestro workflow as an input variable. Refreshes the access token, then triggers the workflow for the stored account. |
+| `POST /webhook/tenant/<id>/trigger` | HTTP route | Tenant-scoped trigger used by Integration Center. `workflowId` required; other properties forwarded as Maestro input variables. |
+| `triggerMaestroWorkflow(data)` | OData action (`/webhook`) | Same logic for authenticated/same-tenant callers; retained for compatibility. |
+
+The shared trigger logic lives in `srv/lib/maestro.js` and is reused by both entry points.
 
 ### 3.3 Persistence (SAP HANA — HDI containers)
 Each subscribed tenant gets its own isolated HDI container, provisioned automatically by the MTX sidecar on subscription (see [§7 Data Persistence](#7-data-persistence-model)).
@@ -105,8 +141,18 @@ Each subscribed tenant gets its own isolated HDI container, provisioned automati
 | `AppConfig` | `clientId`, `clientSecret`, `environment`, `authServer`, `accountId` | App configuration + user-supplied client credentials. Singleton row `ID = '1'`. |
 
 ### 3.4 XSUAA (`docusign-sf-integration-auth`)
-- Managed `xsuaa` service (plan `application`), bound to both apps.
-- Secures the App Router and the `/api` routes of the backend.
+- Managed `xsuaa` service (plan `application`), **`tenant-mode: shared`** (required for SaaS subscriptions).
+- Secures the App Router and the `/api` routes of the backend, and carries the tenant identity.
+
+### 3.5 MTX Sidecar (`docusign-sf-integration-mtx`)
+- Runs `@sap/cds-mtxs`. Handles **tenant lifecycle**: on subscribe it provisions a fresh **HANA HDI container** for that customer and deploys the schema; on unsubscribe it cleans up.
+- Also runs schema **upgrades** across all tenants on redeploy.
+
+### 3.6 SaaS Registry (`docusign-sf-integration-registry`)
+- Registers the app in the BTP **marketplace** so other subaccounts can **subscribe** to it, and wires subscription callbacks to the MTX sidecar.
+
+### 3.7 Service Manager (`docusign-sf-integration-db`)
+- The `service-manager` instance the MTX sidecar uses to create the **per-tenant HDI containers** on the shared HANA Cloud database.
 
 ---
 
@@ -178,44 +224,45 @@ Admin        Browser (SPA)        App Router        CAP Backend        DocuSign
 
 ## 5. Webhook / Maestro Trigger Flow
 
-Once the app is connected and an account is configured, SuccessFactors can trigger workflows.
+Once a customer has connected DocuSign and selected an account, SuccessFactors can trigger workflows using that customer's **own tenant-specific URL** (copied from the Home page).
 
-### Endpoint
+### Endpoint (per tenant)
 ```
-POST https://{approuter-host}/webhook/triggerMaestroWorkflow
+POST https://<tenant-subdomain>-dsf-b67584fctrial.cfapps.ap21.hana.ondemand.com/webhook/tenant/<tenantId>/trigger
 Content-Type: application/json
 
 {
-  "data": {
-    "workflowId": "<maestro-workflow-id>",
-    "employeeName": "John Doe",
-    "email": "john.doe@example.com"
-  }
+  "workflowId": "<maestro-workflow-id>",
+  "employeeName": "John Doe",
+  "email": "john.doe@example.com"
 }
 ```
-- `data` is a single **open object**: `workflowId` is the only required field; every other property (any name/value SuccessFactors sends) is forwarded to the Maestro workflow as an input variable.
-- Public (auth `none`), CSRF disabled — suitable for configuration in **SAP SuccessFactors Integration Center** as an outbound REST/OData destination.
+- `workflowId` is the only required field; every other property (any name/value SuccessFactors sends) is forwarded to the Maestro workflow as an input variable.
+- Public (auth `none`), CSRF disabled — suitable for configuration in **SAP SuccessFactors Integration Center** as an outbound REST destination.
+- The `<tenantId>` in the URL is what tells the app **which customer's** DocuSign token to use.
 
-### Processing logic (`WebhookService.triggerMaestroWorkflow`)
-1. Validate `workflowId` is present (else `400`).
-2. Read the stored token (`DocuSignTokens`) and selected account (`AppConfig.accountId`).
+### Processing logic (tenant-scoped)
+1. Extract `<tenantId>` from the URL and run everything inside that tenant's context (`cds.tx({ tenant })`), so all reads/writes hit **that customer's** HDI container.
+2. Validate `workflowId` is present (else `400`).
+3. Read the stored token (`DocuSignTokens`) and selected account (`AppConfig.accountId`).
    - If no token → `400` "App not authenticated".
    - If no account → `400` "App not configured".
-3. **Refresh the access token on every call.** `POST {authServer}/oauth/token` with `grant_type=refresh_token` and HTTP Basic auth (`base64(clientId:clientSecret)`). The new `access_token`, (rotated) `refresh_token`, and recomputed `expiresAt` are persisted back to `DocuSignTokens`. If the refresh fails (missing/revoked refresh token or credentials) → `401` "DocuSign session expired".
-4. Build the Maestro trigger payload: an auto-generated `instanceName` (`BAS Triggered Workflow - {timestamp}`) and `inputVariables` = every payload property other than `workflowId` (type inferred: string/number/boolean; nested objects are JSON-stringified).
-5. Resolve the **partner-integrations host from the saved environment** (critical — must match the token's issuer environment, otherwise DocuSign returns `Jwt issuer is not configured`):
+4. **Refresh the access token on every call.** `POST {authServer}/oauth/token` with `grant_type=refresh_token` and HTTP Basic auth (`base64(clientId:clientSecret)`). The new `access_token`, (rotated) `refresh_token`, and recomputed `expiresAt` are persisted back. If the refresh fails → `401` "DocuSign session expired".
+5. Build the Maestro payload: an auto-generated `instanceName` and `inputVariables` = every payload property other than `workflowId` (type inferred; nested objects are JSON-stringified).
+6. Resolve the **partner-integrations host from the saved environment** (must match the token's issuer environment, otherwise DocuSign returns `Jwt issuer is not configured`):
    - Stage: `https://services.stage.docusign.net`
    - Demo: `https://services.demo.docusign.net`
    - Production: `https://services.docusign.net`
-6. `POST {host}/partner-integrations/v1.0/accounts/{accountId}/maestro-workflows/trigger/{workflowId}` with `Authorization: Bearer {accessToken}`.
-7. On success → `"Workflow triggered successfully"`. On failure → `500` including the underlying DocuSign error message for easier diagnosis.
+7. `POST {host}/partner-integrations/v1.0/accounts/{accountId}/maestro-workflows/trigger/{workflowId}` with `Authorization: Bearer {accessToken}`.
+8. On success → `"Workflow triggered successfully"`. On failure → `500` including the underlying DocuSign error message.
 
 ### Sequence Diagram — Workflow Trigger
 
 ```
-SuccessFactors    App Router (/webhook, none)    CAP WebhookService    DocuSign
+SuccessFactors    App Router (/webhook, none)    CAP Backend (tenant tx)    DocuSign
       │                    │                             │                    │
-      │ POST trigger ─────▶│ ───────────────────────────▶│                    │
+      │ POST /webhook/tenant/<id>/trigger ──────────────▶│                    │
+      │                    │                             │ switch to tenant   │
       │                    │                             │ read token+account │
       │                    │                             │ POST /oauth/token ─▶│ (refresh_token)
       │                    │                             │◀── new access token │
@@ -231,18 +278,24 @@ SuccessFactors    App Router (/webhook, none)    CAP WebhookService    DocuSign
 
 Defined in `mta.yaml` (schema 3.3.0). Built with `mbt build`, deployed with `cf deploy`.
 
-| Module | Type | Path | Notes |
-|---|---|---|---|
-| `docusign-sf-integration-srv` | nodejs | `gen/srv` | CAP backend. Provides `srv-api` (`srv-url`). |
-| `docusign-sf-integration-approuter` | approuter.nodejs | `app/router` | Serves UI, routes to `srv-api`; build copies `*.html` into `resources/`. |
-| `docusign-sf-integration-auth` | managed-service (xsuaa) | — | Security. Bound to both apps. |
+| Module / Resource | Type | Purpose |
+|---|---|---|
+| `docusign-sf-integration-srv` | nodejs | CAP backend (business logic + tenant-aware webhook). |
+| `docusign-sf-integration-approuter` | approuter.nodejs | Serves UI, routes traffic; short custom host for tenant URLs. |
+| `docusign-sf-integration-mtx` | nodejs | MTX sidecar — onboards tenants, provisions per-tenant HDI, runs upgrades. |
+| `docusign-sf-integration-auth` | xsuaa (shared) | Security + tenant identity. |
+| `docusign-sf-integration-registry` | saas-registry | Makes the app subscribable in the BTP marketplace. |
+| `docusign-sf-integration-db` | service-manager | Creates the per-tenant HANA HDI containers. |
+| `docusign-hana` | HANA Cloud | The shared database that holds all tenant containers. |
 
 Build pipeline: `npm ci` → `npx cds build --production` → package modules → generate `.mtar`.
 
-**Live endpoints (dev space):**
-- App Router: `https://b67584fctrial-dev-docusign-sf-integration-approuter.cfapps.ap21.hana.ondemand.com`
-- Backend:    `https://b67584fctrial-dev-docusign-sf-integration-srv.cfapps.ap21.hana.ondemand.com`
+**Provider endpoints (dev space):**
+- App Router (short host): `https://dsf-b67584fctrial.cfapps.ap21.hana.ondemand.com`
+- Per-tenant URL pattern: `https://<subscriber-subdomain>-dsf-b67584fctrial.cfapps.ap21.hana.ondemand.com`
 - Redirect URI (registry + auth-code): `<app-router>/callback.html`
+
+> **Trial note:** on the shared trial domain, each new subscriber currently needs a one-time `cf map-route`. In production, a single **wildcard route on a custom domain** makes new subscriptions resolve automatically.
 
 ---
 
@@ -260,12 +313,12 @@ Build pipeline: `npm ci` → `npx cds build --production` → package modules �
 
 | Area | Current state | Recommendation |
 |---|---|---|
-| Client secrets | User-supplied, stored in `AppConfig` (no secrets in source). | Encrypt at rest / use SAP Credential Store; move to persistent secure storage. |
-| Webhook endpoint | Public, unauthenticated, CSRF disabled. | Add a shared secret / HMAC signature header validated in `triggerMaestroWorkflow`; IP allow-listing for SuccessFactors. |
-| Token storage | `LargeString` columns, in-memory. | Persist in HANA; consider encryption. Refresh-token exchange is performed on every webhook trigger; move token store to HANA so it survives restarts. |
+| Client secrets | User-supplied, stored per-tenant in `AppConfig` (no secrets in source). | Encrypt at rest / use SAP Credential Store. |
+| Webhook endpoint | Public, unauthenticated, tenant ID in URL. | Add a per-tenant shared secret / HMAC header; optional IP allow-listing for SuccessFactors. |
+| Token storage | `LargeString` columns in each tenant's HANA container; refreshed on every trigger. | Consider column encryption. |
+| Tenant isolation | Each subscriber has its **own** HDI container; webhook runs in `cds.tx({ tenant })`. | Keep; add automated isolation tests. |
 | Scopes | Least-privilege (`signature`, `aow_manage`). | Keep minimal; review per use case. |
-| UI/API access | XSUAA-protected. | Add role-based authorization for admin-only setup. |
-| Multi-tenancy | Singleton `AppConfig` (`ID='1'`), single connection. | Introduce per-tenant/per-account keys if multiple accounts needed. |
+| UI/API access | XSUAA-protected (`tenant-mode: shared`). | Add role collections for admin-only setup. |
 
 ---
 
@@ -276,7 +329,8 @@ Build pipeline: `npm ci` → `npx cds build --production` → package modules �
 | Runtime | Node.js on Cloud Foundry (SAP BTP) |
 | Application framework | SAP CAP (`@sap/cds` v9) |
 | Security | XSUAA (`@sap/xssec`), App Router (`@sap/approuter`) |
-| Persistence | SQLite in-memory (`@cap-js/sqlite`) — HANA recommended for prod |
+| Persistence | SAP HANA Cloud — one isolated HDI container per tenant (`@cap-js/hana`) |
+| Multitenancy | `@sap/cds-mtxs` (MTX sidecar), SaaS Registry, Service Manager |
 | HTTP client | `axios` |
 | Frontend | Static HTML/JS (vanilla), served by App Router |
 | Packaging | Multi-Target Application (MTA), `mbt` + `cf deploy` |
@@ -292,3 +346,8 @@ Build pipeline: `npm ci` → `npx cds build --production` → package modules �
 4. **`LargeString` token columns** — DocuSign JWT access tokens frequently exceed 2000 characters; smaller columns silently truncate them and break Bearer auth.
 5. **Authorization Code Grant (interactive)** — chosen so the app acts on behalf of a real DocuSign user with consent, rather than a service-account/JWT-grant model.
 6. **Refresh-on-every-trigger** — the webhook always exchanges the stored refresh token for a fresh access token before calling Maestro. This avoids `401`/expired-token failures without tracking `expiresAt` at call time, at the cost of one extra token request per trigger.
+7. **Multitenant SaaS (single deployment, isolated tenants)** — one running app serves many customers; each subscriber gets its own HANA HDI container, so their DocuSign credentials, tokens and config never mix. This is cheaper and easier to operate than one deployment per customer.
+8. **Tenant ID in the webhook URL** — because the webhook is unauthenticated, there is no logged-in user to derive the tenant from. Putting the tenant ID in the path (`/webhook/tenant/<id>/trigger`) and running the logic in `cds.tx({ tenant })` guarantees the call reads/writes the *right* customer's data.
+9. **Shared trigger logic (`srv/lib/maestro.js`)** — the interactive service and the public webhook both need identical refresh-and-trigger behaviour, so it lives in one module reused by both.
+10. **HANA everywhere (no SQLite)** — local/hybrid dev binds to a real HDI container so development matches production exactly, avoiding "works locally, breaks in HANA" surprises.
+11. **Short App Router host (`dsf-...`)** — tenant URLs prepend the subscriber subdomain; a shorter base host keeps the full hostname under the 63-character DNS limit.
