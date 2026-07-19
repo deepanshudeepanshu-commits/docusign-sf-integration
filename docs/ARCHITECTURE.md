@@ -1,353 +1,419 @@
-# Engineering Architecture Document
+# Architecture & Product Design
 ## DocuSign – SAP SuccessFactors Integration
 
 | | |
 |---|---|
-| **Application ID** | `docusign-sf-integration` |
 | **Version** | 1.0.0 |
-| **Platform** | SAP Business Technology Platform (BTP), Cloud Foundry runtime |
+| **Platform** | SAP Business Technology Platform (BTP), Cloud Foundry |
 | **Framework** | SAP Cloud Application Programming Model (CAP), Node.js |
-| **Delivery model** | Multitenant SaaS — customers subscribe from their own BTP subaccounts |
-| **Last Updated** | July 19, 2026 |
+| **Delivery** | Single-tenant — deployed per customer in their BTP subaccount |
+| **Last Updated** | July 2026 |
 
 ---
 
-## 1. Purpose & Overview (What & Why)
+## 1. What This Application Does
 
-This application is a **multitenant SaaS bridge between SAP SuccessFactors and DocuSign**. It lets an HR/administrator connect their DocuSign account once, and then trigger a **DocuSign Maestro (Agreement Orchestration) workflow** automatically whenever an event happens in SuccessFactors (e.g. a new hire) — without writing any code.
+This application is a **connector between SAP SuccessFactors and DocuSign Maestro**. It allows an HR administrator to:
 
-### The two goals we set out to achieve
+1. **Connect their DocuSign account** through a self-service guided UI (no developer involvement needed after deployment).
+2. **Get a ready-to-use webhook URL** that they paste into SuccessFactors Integration Center.
+3. **Automatically trigger DocuSign Maestro workflows** whenever an HR event fires in SuccessFactors (e.g. new hire, promotion, termination).
 
-1. **Login & store an access token (self-service connect).**
-   Each customer connects the app to their own DocuSign account through a guided UI. Instead of shipping hardcoded secrets, the admin brings their **own Client ID / Client Secret** from the DocuSign OAuth registry and completes an **OAuth 2.0 Authorization Code Grant** login. The app stores the resulting **access + refresh tokens** securely, per customer.
+The end result: an employee lifecycle event in SuccessFactors automatically kicks off a document workflow in DocuSign — offer letters, NDAs, benefits enrollment — without manual intervention.
 
-2. **Provide a ready-to-use Maestro trigger URL for Integration Center.**
-   The app gives each customer a **unique webhook URL** (shown in the UI, copy-ready). The customer pastes it into **SuccessFactors Integration Center** as an outbound REST call. When SuccessFactors fires an event, it calls that URL, and the app triggers the correct Maestro workflow **using that customer's own DocuSign token**.
+---
 
-### Who uses it (personas)
+## 2. The Problem We Solve
 
-| Persona | What they do |
+Today, connecting SuccessFactors to DocuSign requires either:
+- Custom middleware development (expensive, per-customer effort), or
+- Manual document sending (slow, error-prone, doesn't scale).
+
+This app eliminates both by providing a **zero-code bridge**. The admin connects DocuSign once, pastes a URL into Integration Center, and the system handles authentication, token refresh, and workflow triggering automatically from that point forward.
+
+---
+
+## 3. How Customers Use the Application
+
+### Personas
+
+| Persona | Role |
 |---|---|
-| **Provider (us)** | Build, deploy, and operate the single SaaS app on BTP. |
-| **Customer admin** | Subscribes to the app, connects DocuSign, copies the trigger URL. |
-| **SuccessFactors (system)** | Calls the trigger URL automatically on HR events. |
+| **Customer Admin** | SuccessFactors / BTP administrator who sets up the integration once. |
+| **SuccessFactors (system)** | Fires HR events that trigger the webhook automatically. |
+| **DocuSign Maestro** | Executes the document workflow (e-signatures, approvals, routing). |
 
-### Why SaaS / multitenant
+### User Journey (one-time setup, ~10 minutes)
 
-The app is deployed **once** by us (the provider). Many SuccessFactors customers **subscribe** from their own BTP subaccounts. Each subscriber is an **isolated tenant** with its **own database container** — so one customer never sees another's DocuSign tokens or configuration.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     ADMIN SETUP (one time)                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Step 1: Generate Credentials                                       │
+│  ─────────────────────────────                                      │
+│  Admin selects their DocuSign environment (Demo / Production).      │
+│  Clicks "Open OAuth Registry" → DocuSign opens in a new tab.       │
+│  Admin creates an integration → gets a Client ID and Secret.        │
+│                                                                     │
+│  Step 2: Save Credentials                                           │
+│  ────────────────────────                                           │
+│  Admin pastes Client ID and Secret into the app.                    │
+│  Clicks "Save" → credentials are stored securely on BTP.            │
+│                                                                     │
+│  Step 3: Login with DocuSign                                        │
+│  ───────────────────────────                                        │
+│  Admin clicks "Login" → redirected to DocuSign consent screen.      │
+│  Grants access → redirected back → app stores OAuth tokens.         │
+│  Admin selects which DocuSign account to use.                       │
+│                                                                     │
+│  Step 4: Configure SuccessFactors                                   │
+│  ────────────────────────────────                                   │
+│  App displays a webhook URL and sample JSON body.                   │
+│  Admin copies these into Integration Center as an outbound REST     │
+│  destination. Done.                                                  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### After Setup (fully automatic)
+
+```
+SuccessFactors Event (e.g. "New Hire")
+         │
+         ▼
+Integration Center fires POST to webhook URL
+         │
+         ▼
+App receives the call → refreshes DocuSign token → triggers Maestro
+         │
+         ▼
+DocuSign Maestro executes the workflow (send offer letter, collect signature, etc.)
+```
+
+No human action required after the initial setup. The app handles token refresh transparently.
 
 ---
 
-## 2. High-Level Architecture (How it fits together)
+## 4. How We Deliver This Application
 
-We deploy **one** SaaS app. Each customer **subscribes** from their own subaccount and gets an isolated database container. All UI/API traffic flows through the App Router; SuccessFactors calls the public tenant-specific webhook.
+### Delivery Model: Per-Customer Deployment
 
-```
-   CUSTOMER A subaccount          CUSTOMER B subaccount        (each subscribes once)
-          │  subscribe                    │  subscribe
-          ▼                               ▼
- ┌───────────────────────────────────────────────────────────────────────────┐
- │                     SAP BTP – Cloud Foundry  (Provider)                     │
- │                                                                            │
- │   ┌──────────────────┐        ┌───────────────────────┐                    │
- │   │   App Router      │  /api  │  CAP Backend (srv)    │                    │
- │   │ (approuter.nodejs)│───────▶│  IntegrationService   │   per-tenant       │
- │   │  - UI (*.html)    │        │   (protected /api)    │   data access      │
- │   │  - /api  (xsuaa)  │  /web- │  Webhook route        │──────┐             │
- │   │  - /webhook (none)│  hook  │  (tenant-aware)       │      │             │
- │   └───────┬──────────┘        └───────────────────────┘      ▼             │
- │           │ xsuaa (shared)                              ┌───────────────┐   │
- │           ▼                    ┌───────────────────┐    │  SAP HANA     │   │
- │   ┌──────────────┐             │  MTX Sidecar      │    │  Cloud        │   │
- │   │    XSUAA     │             │ (onboards tenants,│───▶│  ┌─────────┐  │   │
- │   └──────────────┘             │  provisions HDI)  │    │  │ HDI: A  │  │   │
- │           ▲                    └─────────┬─────────┘    │  ├─────────┤  │   │
- │           │                              │              │  │ HDI: B  │  │   │
- │   ┌───────┴────────┐            ┌─────────▼────────┐    │  └─────────┘  │   │
- │   │ SaaS Registry  │◀──────────▶│  Service Manager │    └───────────────┘   │
- │   │ (marketplace)  │            │ (creates HDI/    │     one isolated       │
- │   └────────────────┘            │  tenant)         │     container/tenant   │
- │                                 └──────────────────┘                        │
- └───────────────────────────────────────────────┬───────────────────────────┘
-                                                  │ HTTPS (per-tenant token)
-   ┌──────────────┐  POST /webhook/tenant/<id>/…  ▼
-   │ SAP Success- │───────────────────────────▶ (App Router → Backend)   ┌──────────┐
-   │  Factors     │   (configured in                                     │ DocuSign │
-   │ Integration  │    Integration Center)                               │ (OAuth + │
-   │  Center      │                                                      │  Maestro)│
-   └──────────────┘                                                      └──────────┘
-```
+The app is deployed **into the customer's own BTP subaccount**. This means:
 
-**In one line:** the App Router serves the UI and forwards traffic; the CAP backend holds the business logic; the MTX sidecar + Service Manager give each subscriber its own HANA HDI container; the SaaS Registry makes the app subscribable; XSUAA secures it.
+- Each customer has their **own isolated instance** — no shared infrastructure between customers.
+- Credentials and tokens live only in that customer's BTP space.
+- The customer (or we on their behalf) controls the deployment lifecycle.
+
+### Deployment Options
+
+| Option | Who deploys | Best for |
+|---|---|---|
+| **Customer self-service** | Customer's BTP admin runs `cf deploy` | Customers with BTP expertise |
+| **Partner-assisted** | We deploy into customer's subaccount (with access) | Most customers |
+| **Managed service** | We host and operate on our own BTP account per customer | Enterprise customers wanting hands-off |
+
+### What Gets Deployed
+
+A single Multi-Target Application (MTA) archive containing:
+
+| Component | Purpose |
+|---|---|
+| **App Router** | Serves the admin UI and routes API traffic |
+| **CAP Backend** | Business logic: OAuth flow, token management, webhook handling |
+| **Destination Service** (BTP managed) | Secure storage for credentials and tokens |
+| **XSUAA** (BTP managed) | Keeps the CDS runtime happy on Cloud Foundry |
+
+No database required. No HANA. The Destination Service acts as a lightweight key-value store for the small amount of state this app needs (credentials, tokens, selected account).
 
 ---
 
-## 3. Component Breakdown
-
-### 3.1 App Router (`docusign-sf-integration-approuter`)
-- Type: `approuter.nodejs`, path `app/router`.
-- Serves the static admin UI (`index.html`, `callback.html`, `configure.html`, `home.html`) from `resources/`.
-- Uses a **short custom host** (`dsf-b67584fctrial`) so per-tenant subscription URLs stay within the DNS 63-character limit.
-- Route configuration (`xs-app.json`):
-
-| Route | Auth | Purpose |
-|---|---|---|
-| `^/-/cds/.*` | **none** | MTX sidecar endpoints (tenant onboarding callbacks). |
-| `^/webhook/(.*)$` | **none** | Public endpoint for SuccessFactors → tenant-aware webhook. CSRF disabled. |
-| `^/api/(.*)$` | **xsuaa** | Protected OData/actions → `IntegrationService`. Auth token forwarded to backend. |
-| `^/(.*)$` | **xsuaa** | Static UI assets. |
-
-- `TENANT_HOST_PATTERN` lets the App Router identify the calling tenant from the subscription subdomain.
-- `forwardAuthToken: true` on the `srv-api` destination ensures the user's JWT (with tenant info) reaches the backend for protected routes.
-
-### 3.2 CAP Backend (`docusign-sf-integration-srv`)
-- Type: `nodejs`, path `gen/srv` (built from `srv/`).
-- Hosts two CAP services and the persistence layer.
-
-#### `IntegrationService` — protected, `@(path: '/api')`
-Requires an authenticated user (XSUAA). Handles all admin/setup operations.
-
-| Operation | Type | Description |
-|---|---|---|
-| `Tokens`, `Users`, `Config` | Entities (projections) | Read access to stored state. |
-| `exchangeToken(code)` | Function | Exchanges the OAuth authorization code for DocuSign tokens (auth-code grant), stores tokens + user profile. |
-| `getTenantId()` | Function | Returns the caller's tenant (subscriber) ID so the UI can build the tenant-specific webhook URL. |
-| `saveAppConfig(...)` | Action | Persists environment, auth server, Client ID, Client Secret, and selected Account ID. |
-| `logout()` | Action | Wipes all tokens, user info, and config. |
-
-#### `WebhookService` + tenant-aware webhook route — public, unauthenticated
-SuccessFactors Integration Center calls an **unauthenticated** endpoint, so it carries no login/tenant token. To still target the right subscriber, the app exposes a **tenant-aware webhook** whose URL contains the tenant ID:
+## 5. High-Level Architecture
 
 ```
-POST /webhook/tenant/<tenantId>/trigger
+┌─────────────────────────────────────────────────────────────────┐
+│              Customer's BTP Subaccount (Cloud Foundry)           │
+│                                                                 │
+│  ┌──────────────┐         ┌──────────────────────┐              │
+│  │  App Router  │  /api   │    CAP Backend       │              │
+│  │              │────────▶│                      │              │
+│  │  Serves UI   │         │  • OAuth flow        │              │
+│  │  Routes /api │         │  • Token management  │              │
+│  │  Routes /web-│  /web-  │  • Webhook handler   │              │
+│  │    hook      │──hook──▶│  • Maestro trigger   │              │
+│  └──────────────┘         └──────────┬───────────┘              │
+│                                      │                          │
+│                            ┌─────────▼──────────┐               │
+│                            │ Destination Service │               │
+│                            │ (credential store)  │               │
+│                            └────────────────────┘               │
+│                                                                 │
+└───────────────────────────┬─────────────────┬───────────────────┘
+                            │                 │
+              ┌─────────────▼──┐       ┌──────▼──────────┐
+              │ DocuSign       │       │ SAP             │
+              │ • OAuth Server │       │ SuccessFactors  │
+              │ • Maestro API  │       │ Integration     │
+              │                │       │ Center          │
+              └────────────────┘       └─────────────────┘
 ```
 
-The handler runs the trigger logic inside that tenant's context (`cds.tx({ tenant })`), so it reads **that customer's** DocuSign token/config from **their** HDI container and triggers Maestro on their behalf.
+### Data Flow Summary
 
-| Operation | Type | Description |
-|---|---|---|
-| `POST /webhook/tenant/<id>/trigger` | HTTP route | Tenant-scoped trigger used by Integration Center. `workflowId` required; other properties forwarded as Maestro input variables. |
-| `triggerMaestroWorkflow(data)` | OData action (`/webhook`) | Same logic for authenticated/same-tenant callers; retained for compatibility. |
+1. **Setup flow (admin → DocuSign):** Admin authenticates with DocuSign through the UI. OAuth tokens are stored in the Destination Service.
 
-The shared trigger logic lives in `srv/lib/maestro.js` and is reused by both entry points.
-
-### 3.3 Persistence (SAP HANA — HDI containers)
-Each subscribed tenant gets its own isolated HDI container, provisioned automatically by the MTX sidecar on subscription (see [§7 Data Persistence](#7-data-persistence-model)).
-
-| Entity | Key fields | Purpose |
-|---|---|---|
-| `DocuSignTokens` | `accessToken`, `refreshToken`, `expiresAt` (LargeString) | Stores the OAuth tokens. `LargeString` avoids JWT truncation. |
-| `UserInfo` | `sub`, `name`, `email`, `accounts` | DocuSign user profile + available accounts (JSON). |
-| `AppConfig` | `clientId`, `clientSecret`, `environment`, `authServer`, `accountId` | App configuration + user-supplied client credentials. Singleton row `ID = '1'`. |
-
-### 3.4 XSUAA (`docusign-sf-integration-auth`)
-- Managed `xsuaa` service (plan `application`), **`tenant-mode: shared`** (required for SaaS subscriptions).
-- Secures the App Router and the `/api` routes of the backend, and carries the tenant identity.
-
-### 3.5 MTX Sidecar (`docusign-sf-integration-mtx`)
-- Runs `@sap/cds-mtxs`. Handles **tenant lifecycle**: on subscribe it provisions a fresh **HANA HDI container** for that customer and deploys the schema; on unsubscribe it cleans up.
-- Also runs schema **upgrades** across all tenants on redeploy.
-
-### 3.6 SaaS Registry (`docusign-sf-integration-registry`)
-- Registers the app in the BTP **marketplace** so other subaccounts can **subscribe** to it, and wires subscription callbacks to the MTX sidecar.
-
-### 3.7 Service Manager (`docusign-sf-integration-db`)
-- The `service-manager` instance the MTX sidecar uses to create the **per-tenant HDI containers** on the shared HANA Cloud database.
+2. **Trigger flow (SuccessFactors → DocuSign):** Integration Center POSTs to the webhook. The app reads the stored token, refreshes it, and calls DocuSign Maestro API to trigger the workflow.
 
 ---
 
-## 4. Authentication & Token Generation Flow
+## 6. OAuth 2.0 Authentication Design
 
-The app uses the **OAuth 2.0 Authorization Code Grant** with **user-supplied client credentials** (no secrets hardcoded in the app). Setup is a guided 3-step wizard on `index.html`.
+The app uses **Authorization Code Grant** — the standard OAuth flow for acting on behalf of a real user with their explicit consent.
 
-### Step 1 — Generate credentials (DocuSign OAuth Registry)
-- The admin selects a **DocuSign environment**: `Stage`, `Demo`, or `Production`.
-- Clicking **Open OAuth Registry** opens (in a new tab) the environment-specific registry URL with the app's callback pre-attached as `redirect_uri`:
-  - Stage: `https://apps-s.docusign.com/oauth-registry?integrationType=sap`
-  - Demo: `https://apps-d.docusign.com/oauth-registry?integrationType=sap`
-  - Production: `https://apps.docusign.com/oauth-registry?integrationType=sap`
-  - `&redirect_uri=<app-origin>/callback.html`
-- In the registry the admin creates an integration and obtains a **Client ID (Integration Key)** and **Client Secret**.
+### Why this grant type
+- The app triggers workflows **as a specific DocuSign user** (the admin who logged in).
+- The user explicitly consents to the scopes (`signature`, `aow_manage`).
+- Refresh tokens allow long-lived access without re-authentication.
 
-### Step 2 — Save credentials
-- The admin pastes the Client ID and Client Secret into the app.
-- The frontend calls `POST /api/saveAppConfig` which persists `clientId`, `clientSecret`, `environment`, and the derived `authServer` into `AppConfig`.
-- Auth servers per environment:
-  - Stage: `https://account-s.docusign.com`
-  - Demo: `https://account-d.docusign.com`
-  - Production: `https://account.docusign.com`
+### Why user-supplied credentials
+- The admin creates their **own** OAuth app in DocuSign's registry.
+- No DocuSign secrets are hardcoded in our application.
+- Each customer's credentials are isolated — revoking one doesn't affect others.
+- The redirect URI is automatically set to the customer's deployed app URL.
 
-### Step 3 — Login (Authorization Code Grant)
-- The admin clicks **Login with DocuSign**. The browser is redirected to:
-  ```
-  {authServer}/oauth/auth?response_type=code
-        &scope=signature%20aow_manage
-        &client_id={clientId}
-        &redirect_uri={app-origin}/callback.html
-  ```
-  Scopes requested (least-privilege):
-  - `signature` — envelope / signing operations
-  - `aow_manage` — trigger & manage Maestro (Agreement Orchestration) workflows
-- After the admin authorizes, DocuSign redirects back to **`/callback.html?code=...`**.
-- `callback.html` calls `GET /api/exchangeToken(code=...)`, which server-side:
-  1. Reads `clientId`, `clientSecret`, `authServer` from `AppConfig`.
-  2. `POST {authServer}/oauth/token` with `grant_type=authorization_code` and HTTP Basic auth (`base64(clientId:clientSecret)`).
-  3. Stores `access_token`, `refresh_token`, and computed `expiresAt` in `DocuSignTokens`.
-  4. Calls `GET {authServer}/oauth/userinfo` and stores the profile + accounts in `UserInfo`.
-- The admin is then taken to `configure.html` to select the DocuSign **Account** (stored as `AppConfig.accountId`), and finally `home.html` shows the connected status (User, Email, Environment, Selected Account).
-
-> **Login-page routing:** On load, `index.html` checks the backend for existing state (`Config` + `Tokens`). If tokens **and** client credentials **and** a selected account already exist, it redirects to `home.html`; if tokens + credentials exist but no account is selected, it resumes at `configure.html`; otherwise it stays on the login page and pre-fills any saved config.
-
-### Sequence Diagram — Token Generation
+### Token lifecycle
 
 ```
-Admin        Browser (SPA)        App Router        CAP Backend        DocuSign
-  │                │                   │                 │                 │
-  │ pick env       │                   │                 │                 │
-  │ Open Registry ▶│  new tab ─────────┼─────────────────┼────────────────▶│ (registry)
-  │                │                   │                 │   create app    │
-  │ paste ID/secret│                   │                 │   copy creds    │
-  │ Save ─────────▶│ POST /api/save    │────────────────▶│ store AppConfig │
-  │                │  AppConfig        │                 │                 │
-  │ Login ────────▶│ redirect /oauth/auth ───────────────┼────────────────▶│ (consent)
-  │                │◀── redirect /callback.html?code=... ─┼─────────────────│
-  │                │ GET /api/exchangeToken(code) ───────▶│ POST /oauth/token▶│
-  │                │                   │                 │◀─ tokens ────────│
-  │                │                   │                 │ GET /userinfo ──▶│
-  │                │                   │                 │ store tokens+user│
-  │                │◀── userInfo ──────┼─────────────────│                 │
-  │ configure acct │ POST /api/saveAppConfig(accountId) ─▶│ store accountId │
-  │ home (connected)│                  │                 │                 │
+Initial Login:
+  Auth Code → Access Token (short-lived) + Refresh Token (long-lived)
+  Both stored in Destination Service.
+
+On every webhook trigger:
+  Refresh Token → New Access Token + New Refresh Token
+  Old tokens replaced. If refresh fails → admin must re-login.
 ```
+
+This "refresh on every call" strategy means the app never has stale tokens — at the cost of one extra HTTP call per trigger (negligible given Maestro API latency).
 
 ---
 
-## 5. Webhook / Maestro Trigger Flow
+## 7. Webhook & Maestro Trigger Design
 
-Once a customer has connected DocuSign and selected an account, SuccessFactors can trigger workflows using that customer's **own tenant-specific URL** (copied from the Home page).
+### The webhook endpoint
 
-### Endpoint (per tenant)
 ```
-POST https://<tenant-subdomain>-dsf-b67584fctrial.cfapps.ap21.hana.ondemand.com/webhook/tenant/<tenantId>/trigger
+POST /webhook/trigger
 Content-Type: application/json
 
 {
-  "workflowId": "<maestro-workflow-id>",
-  "employeeName": "John Doe",
-  "email": "john.doe@example.com"
+  "workflowId": "abc123-def456",
+  "employeeName": "Jane Smith",
+  "email": "jane.smith@company.com",
+  ...any other fields...
 }
 ```
-- `workflowId` is the only required field; every other property (any name/value SuccessFactors sends) is forwarded to the Maestro workflow as an input variable.
-- Public (auth `none`), CSRF disabled — suitable for configuration in **SAP SuccessFactors Integration Center** as an outbound REST destination.
-- The `<tenantId>` in the URL is what tells the app **which customer's** DocuSign token to use.
 
-### Processing logic (tenant-scoped)
-1. Extract `<tenantId>` from the URL and run everything inside that tenant's context (`cds.tx({ tenant })`), so all reads/writes hit **that customer's** HDI container.
-2. Validate `workflowId` is present (else `400`).
-3. Read the stored token (`DocuSignTokens`) and selected account (`AppConfig.accountId`).
-   - If no token → `400` "App not authenticated".
-   - If no account → `400` "App not configured".
-4. **Refresh the access token on every call.** `POST {authServer}/oauth/token` with `grant_type=refresh_token` and HTTP Basic auth (`base64(clientId:clientSecret)`). The new `access_token`, (rotated) `refresh_token`, and recomputed `expiresAt` are persisted back. If the refresh fails → `401` "DocuSign session expired".
-5. Build the Maestro payload: an auto-generated `instanceName` and `inputVariables` = every payload property other than `workflowId` (type inferred; nested objects are JSON-stringified).
-6. Resolve the **partner-integrations host from the saved environment** (must match the token's issuer environment, otherwise DocuSign returns `Jwt issuer is not configured`):
-   - Stage: `https://services.stage.docusign.net`
-   - Demo: `https://services.demo.docusign.net`
-   - Production: `https://services.docusign.net`
-7. `POST {host}/partner-integrations/v1.0/accounts/{accountId}/maestro-workflows/trigger/{workflowId}` with `Authorization: Bearer {accessToken}`.
-8. On success → `"Workflow triggered successfully"`. On failure → `500` including the underlying DocuSign error message.
+- **Public, unauthenticated** — SuccessFactors Integration Center doesn't support OAuth for outbound calls. The endpoint must be callable without a token.
+- **`workflowId` is required** — tells the app which Maestro workflow to kick off.
+- **All other fields are forwarded** as input variables to the Maestro workflow. The customer maps SuccessFactors fields in Integration Center; the app passes them through.
 
-### Sequence Diagram — Workflow Trigger
+### What happens on trigger
 
-```
-SuccessFactors    App Router (/webhook, none)    CAP Backend (tenant tx)    DocuSign
-      │                    │                             │                    │
-      │ POST /webhook/tenant/<id>/trigger ──────────────▶│                    │
-      │                    │                             │ switch to tenant   │
-      │                    │                             │ read token+account │
-      │                    │                             │ POST /oauth/token ─▶│ (refresh_token)
-      │                    │                             │◀── new access token │
-      │                    │                             │ resolve env host   │
-      │                    │                             │ POST trigger ──────▶│ (Maestro)
-      │                    │                             │◀── 200 / error ────│
-      │◀── 200 "triggered" │◀────────────────────────────│                    │
-```
+1. Read stored credentials + tokens from the Destination Service.
+2. Refresh the access token (exchange refresh token for new access + refresh).
+3. Build the Maestro trigger payload with the provided input variables.
+4. Call DocuSign's partner-integrations API to trigger the workflow.
+5. Return success/failure to SuccessFactors.
 
----
+### Environment resolution
 
-## 6. Deployment Architecture (MTA)
+The app supports three DocuSign environments. All URLs (OAuth and API) are derived from the environment the admin selected during setup:
 
-Defined in `mta.yaml` (schema 3.3.0). Built with `mbt build`, deployed with `cf deploy`.
-
-| Module / Resource | Type | Purpose |
+| Environment | Auth Server | API Host |
 |---|---|---|
-| `docusign-sf-integration-srv` | nodejs | CAP backend (business logic + tenant-aware webhook). |
-| `docusign-sf-integration-approuter` | approuter.nodejs | Serves UI, routes traffic; short custom host for tenant URLs. |
-| `docusign-sf-integration-mtx` | nodejs | MTX sidecar — onboards tenants, provisions per-tenant HDI, runs upgrades. |
-| `docusign-sf-integration-auth` | xsuaa (shared) | Security + tenant identity. |
-| `docusign-sf-integration-registry` | saas-registry | Makes the app subscribable in the BTP marketplace. |
-| `docusign-sf-integration-db` | service-manager | Creates the per-tenant HANA HDI containers. |
-| `docusign-hana` | HANA Cloud | The shared database that holds all tenant containers. |
-
-Build pipeline: `npm ci` → `npx cds build --production` → package modules → generate `.mtar`.
-
-**Provider endpoints (dev space):**
-- App Router (short host): `https://dsf-b67584fctrial.cfapps.ap21.hana.ondemand.com`
-- Per-tenant URL pattern: `https://<subscriber-subdomain>-dsf-b67584fctrial.cfapps.ap21.hana.ondemand.com`
-- Redirect URI (registry + auth-code): `<app-router>/callback.html`
-
-> **Trial note:** on the shared trial domain, each new subscriber currently needs a one-time `cf map-route`. In production, a single **wildcard route on a custom domain** makes new subscriptions resolve automatically.
+| Stage | `account-s.docusign.com` | `services.stage.docusign.net` |
+| Demo | `account-d.docusign.com` | `services.demo.docusign.net` |
+| Production | `account.docusign.com` | `services.docusign.net` |
 
 ---
 
-## 7. Data Persistence Model
+## 8. Persistence Strategy
 
-- The `db` is configured as **SAP HANA** (`kind: hana`) in all profiles — there is no SQLite anymore.
-- **Production:** the MTX sidecar provisions one **isolated HDI container per subscribed tenant**; schema is deployed automatically on subscription.
-- **Local/hybrid development:** the runtime binds to a dedicated HDI container via `cds bind`, and the schema is deployed with `cds deploy --to hana --profile hybrid`. Run the app with `cds watch --profile hybrid`.
-- **Consequence:** all state (tokens, user info, config) is **persistent** and survives app restarts and redeploys, and supports refresh-token rotation.
-- No custom `srv/server.js` bootstrap is needed; CAP's default server is used.
+### Why Destination Service (not a database)
 
----
+The app stores very little state:
+- Client ID, Client Secret
+- Access Token, Refresh Token, Expiration
+- Selected Environment, Account ID
 
-## 8. Security Considerations
+This is a handful of string values — not relational data. Using the BTP Destination Service as a key-value store:
+- Eliminates the need for HANA Cloud (cost savings).
+- No schema migrations, no database provisioning.
+- Data is encrypted at rest by the platform.
+- Simplifies deployment (fewer BTP services to provision).
 
-| Area | Current state | Recommendation |
-|---|---|---|
-| Client secrets | User-supplied, stored per-tenant in `AppConfig` (no secrets in source). | Encrypt at rest / use SAP Credential Store. |
-| Webhook endpoint | Public, unauthenticated, tenant ID in URL. | Add a per-tenant shared secret / HMAC header; optional IP allow-listing for SuccessFactors. |
-| Token storage | `LargeString` columns in each tenant's HANA container; refreshed on every trigger. | Consider column encryption. |
-| Tenant isolation | Each subscriber has its **own** HDI container; webhook runs in `cds.tx({ tenant })`. | Keep; add automated isolation tests. |
-| Scopes | Least-privilege (`signature`, `aow_manage`). | Keep minimal; review per use case. |
-| UI/API access | XSUAA-protected (`tenant-mode: shared`). | Add role collections for admin-only setup. |
+### How it works
+
+All state is stored as properties of a single "destination" entry named `docusign` in the Destination Service. The app's persistence layer reads/writes this entry through the Destination Configuration REST API using a service-to-service OAuth token (client credentials grant against the Destination Service binding).
 
 ---
 
-## 9. Technology Stack
+## 9. Integration Center Configuration (Customer Side)
 
-| Layer | Technology |
+Once the app is set up, the customer configures SuccessFactors Integration Center:
+
+1. **Create an outbound integration** (type: REST / More Object Types).
+2. **Set the URL** to the webhook URL shown in the app's home page.
+3. **Set the method** to POST and Content-Type to `application/json`.
+4. **Map the body** — include the `workflowId` (fixed) and any employee fields the Maestro workflow needs.
+5. **Configure the trigger** — choose which HR event fires the integration (new hire, termination, etc.).
+
+No authentication headers needed. No certificates. Just a URL and a JSON body.
+
+---
+
+## 10. Security Design
+
+| Concern | How it's handled |
 |---|---|
-| Runtime | Node.js on Cloud Foundry (SAP BTP) |
-| Application framework | SAP CAP (`@sap/cds` v9) |
-| Security | XSUAA (`@sap/xssec`), App Router (`@sap/approuter`) |
-| Persistence | SAP HANA Cloud — one isolated HDI container per tenant (`@cap-js/hana`) |
-| Multitenancy | `@sap/cds-mtxs` (MTX sidecar), SaaS Registry, Service Manager |
-| HTTP client | `axios` |
-| Frontend | Static HTML/JS (vanilla), served by App Router |
-| Packaging | Multi-Target Application (MTA), `mbt` + `cf deploy` |
-| External APIs | DocuSign OAuth Registry, DocuSign Auth Server, DocuSign Maestro / partner-integrations API |
+| **Credential isolation** | Each customer's credentials live only in their own BTP space. No shared storage. |
+| **No hardcoded secrets** | Customer brings their own Client ID/Secret from DocuSign's registry. |
+| **Token storage** | Stored in BTP Destination Service (platform-managed, encrypted at rest). |
+| **Admin UI access** | Currently unprotected (accessible to anyone with the URL). XSUAA is bound only because the CDS runtime on Cloud Foundry requires it to start — it does not enforce authentication on any route. See "Future security enhancements" below. |
+| **Webhook (public)** | Unauthenticated by design (Integration Center limitation). Mitigated by: the webhook only triggers workflows — it can't read or exfiltrate data. |
+| **Least-privilege scopes** | Only `signature` and `aow_manage` are requested — minimum needed for Maestro triggers. |
+| **Token refresh** | Tokens are rotated on every use. A compromised access token expires within minutes. |
+
+### Future security enhancements (not yet implemented)
+- HMAC signature verification on webhook calls (shared secret between SF and app).
+- IP allowlisting for SuccessFactors outbound IPs.
+- Admin role-based access (restrict who can reconfigure credentials).
 
 ---
 
-## 10. Key Design Decisions
+## 11. Key Design Decisions
 
-1. **No hardcoded DocuSign secrets** — the admin brings their own Client ID/Secret via the OAuth registry, making the app distributable and environment-agnostic.
-2. **Separate public `WebhookService`** — required because CAP applies `authenticated-user` at the service-router level; a truly public endpoint must live in its own `@requires: 'any'` service exposed via the App Router with auth `none`.
-3. **Environment-aware hosts** — auth server and Maestro (partner-integrations) hosts are derived from the saved environment to prevent `Jwt issuer is not configured` errors caused by cross-environment token/API mismatches.
-4. **`LargeString` token columns** — DocuSign JWT access tokens frequently exceed 2000 characters; smaller columns silently truncate them and break Bearer auth.
-5. **Authorization Code Grant (interactive)** — chosen so the app acts on behalf of a real DocuSign user with consent, rather than a service-account/JWT-grant model.
-6. **Refresh-on-every-trigger** — the webhook always exchanges the stored refresh token for a fresh access token before calling Maestro. This avoids `401`/expired-token failures without tracking `expiresAt` at call time, at the cost of one extra token request per trigger.
-7. **Multitenant SaaS (single deployment, isolated tenants)** — one running app serves many customers; each subscriber gets its own HANA HDI container, so their DocuSign credentials, tokens and config never mix. This is cheaper and easier to operate than one deployment per customer.
-8. **Tenant ID in the webhook URL** — because the webhook is unauthenticated, there is no logged-in user to derive the tenant from. Putting the tenant ID in the path (`/webhook/tenant/<id>/trigger`) and running the logic in `cds.tx({ tenant })` guarantees the call reads/writes the *right* customer's data.
-9. **Shared trigger logic (`srv/lib/maestro.js`)** — the interactive service and the public webhook both need identical refresh-and-trigger behaviour, so it lives in one module reused by both.
-10. **HANA everywhere (no SQLite)** — local/hybrid dev binds to a real HDI container so development matches production exactly, avoiding "works locally, breaks in HANA" surprises.
-11. **Short App Router host (`dsf-...`)** — tenant URLs prepend the subscriber subdomain; a shorter base host keeps the full hostname under the 63-character DNS limit.
+| Decision | Rationale |
+|---|---|
+| **Single-tenant (not SaaS)** | Simpler to deploy, no multitenancy overhead, stronger isolation. Each customer gets their own app instance. |
+| **Destination Service as storage** | The app stores ~6 string values. A full database (HANA) is overkill and expensive. |
+| **User-supplied OAuth credentials** | Makes the app distributable without embedding secrets. Each customer controls their own DocuSign integration. |
+| **Authorization Code Grant** | Acts on behalf of a real user with consent. Supports refresh tokens for long-lived access. |
+| **Refresh on every trigger** | Avoids expired-token failures without complex scheduling. One extra HTTP call per trigger is negligible. |
+| **Public webhook** | SuccessFactors Integration Center doesn't support outbound OAuth. The webhook must be callable without auth headers. |
+| **Environment-aware URL resolution** | Auth server and API host are derived from the selected environment, preventing cross-environment token mismatches. |
+| **No MTX / no HANA / no SaaS Registry** | Removed complexity that wasn't needed for the single-tenant model. Fewer BTP services = lower cost + simpler operations. |
+
+---
+
+## 12. Distribution & Customer Setup
+
+### How We Deliver the Application
+
+We distribute the app as a **pre-built MTA archive** (`.mtar` file). The customer deploys it into their own BTP subaccount. No source code access required.
+
+```
+┌──────────────────┐          ┌─────────────────────────────────────────┐
+│   We (provider)  │          │       Customer's BTP Subaccount         │
+│                  │  .mtar   │                                         │
+│  Build the app   │─────────▶│  Deploy with cf deploy                  │
+│  Deliver .mtar   │          │  App is running in their own space      │
+│                  │          │  Open the app URL → guided setup wizard │
+└──────────────────┘          └─────────────────────────────────────────┘
+```
+
+### Distribution Channels
+
+| Channel | How it works | When to use |
+|---|---|---|
+| **Direct handoff** | We send the `.mtar` file + a one-page setup guide to the customer. | Known customers, pilot phase. |
+| **Partner portal / download site** | Customer downloads the latest `.mtar` from a private portal. | Scaling to more customers without one-to-one handoff. |
+| **SAP BTP Marketplace (future)** | Requires converting to multitenant SaaS + SAP PartnerEdge certification. Customers subscribe with one click. | Mass market, self-service onboarding at scale. |
+
+### What the Customer Needs (Prerequisites)
+
+Before deploying, the customer must have:
+
+1. **SAP BTP account** with Cloud Foundry environment enabled.
+2. **Cloud Foundry space** with at least ~512 MB memory quota available.
+3. **Cloud Foundry CLI** (`cf`) installed with the MultiApps plugin.
+4. **A DocuSign account** (Demo or Production) where they can create an OAuth integration.
+5. **SAP SuccessFactors** with Integration Center access (for the webhook setup — not needed for initial deployment).
+
+### Customer Deployment Steps
+
+```
+Step 1: Deploy the app (BTP admin, ~5 minutes)
+──────────────────────────────────────────────
+  $ cf login -a <api-endpoint>
+  $ cf deploy docusign-sf-integration_1.0.0.mtar
+
+  → BTP provisions the Destination Service and XSUAA automatically.
+  → App Router and Backend start running.
+  → The admin gets a URL like:
+    https://<org>-<space>-docusign-sf-integration-approuter.cfapps.<region>.hana.ondemand.com
+
+
+Step 2: Connect DocuSign (HR admin, ~5 minutes)
+───────────────────────────────────────────────
+  Open the app URL in a browser → guided 3-step wizard:
+    1. Select environment (Demo/Production) → Open DocuSign Registry → create integration → get Client ID/Secret.
+    2. Paste Client ID + Secret → Save.
+    3. Click Login → authorize on DocuSign → select account.
+
+  → App is now connected. The home page shows a webhook URL.
+
+
+Step 3: Configure SuccessFactors (HR admin, ~10 minutes)
+────────────────────────────────────────────────────────
+  In SuccessFactors → Admin Center → Integration Center:
+    1. Create a new outbound REST integration.
+    2. Paste the webhook URL from the app's home page.
+    3. Set method to POST, Content-Type: application/json.
+    4. Map the body: include workflowId + any employee fields.
+    5. Set the trigger event (e.g. New Hire).
+    6. Activate.
+
+  → Done. HR events now automatically trigger DocuSign Maestro workflows.
+```
+
+### After Deployment — What the Customer Manages
+
+| Task | Frequency | How |
+|---|---|---|
+| **Nothing (day-to-day)** | — | Token refresh is automatic. No manual intervention needed. |
+| **Re-login** | Rare (only if DocuSign revokes the refresh token) | Open app URL → Login again. |
+| **App updates** | When we release a new version | We provide new `.mtar` → customer runs `cf deploy` again. State persists. |
+| **Uninstall** | If no longer needed | `cf undeploy docusign-sf-integration --delete-services` |
+
+### Future: SAP Store Distribution (Multitenant SaaS)
+
+To list on the SAP BTP marketplace for one-click customer subscriptions, the app would need to be converted to multitenant SaaS:
+
+- Add SAP HANA Cloud (per-tenant HDI containers for data isolation).
+- Add MTX sidecar (tenant provisioning on subscribe).
+- Add SaaS Registry (makes the app subscribable from other subaccounts).
+- Add Service Manager (creates per-tenant database containers).
+- Change XSUAA to `tenant-mode: shared`.
+- Join SAP PartnerEdge program and pass certification.
+
+This is a significant evolution but follows a well-documented SAP pattern. The current single-tenant architecture is the right starting point — it validates the product before investing in SaaS infrastructure.
+
+---
+
+## 13. Operational Model
+
+### Build & Deploy (our side)
+```
+npm ci → mbt build → delivers docusign-sf-integration_1.0.0.mtar
+```
+
+### Monitoring (customer side)
+- Application logs via `cf logs <app-name> --recent`
+- All errors include the operation context (which step failed)
+- Token refresh failures are logged — indicates the admin needs to re-login
+
+### Maintenance
+- **Token rotation is automatic** — no scheduled jobs needed.
+- **App updates** — we provide new `.mtar`; customer redeploys. State in Destination Service persists across deploys.
+- **Re-authentication** — only needed if the refresh token is revoked (admin changed DocuSign password, or DocuSign invalidated the token).
