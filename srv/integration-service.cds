@@ -8,6 +8,10 @@ service IntegrationService @(path: '/api') {
     @readonly
     function exchangeToken(code: String) returns LargeString;
 
+    // Returns the current tenant (subscriber subaccount) ID, so the UI can
+    // build the tenant-specific SuccessFactors webhook URL.
+    function getTenantId() returns String;
+
     action saveAppConfig(
         accountId: String,
         environment: String,

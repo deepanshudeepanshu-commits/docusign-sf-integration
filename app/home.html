@@ -34,6 +34,21 @@
         .btn.secondary { background-color: #fff; color: #bb0000; border: 1px solid #bb0000; margin-left: 12px; }
         .btn.secondary:hover { background-color: #ffeaea; }
         .actions { text-align: center; }
+        /* Webhook / Integration Center section */
+        .webhook { border-top: 1px solid #eee; margin-top: 28px; padding-top: 18px; }
+        .webhook h3 { margin: 0 0 4px; font-size: 17px; }
+        .webhook .hint { font-size: 13px; color: #6a6d70; margin: 0 0 14px; }
+        .field { margin-top: 14px; }
+        .field label { display: block; font-weight: bold; margin-bottom: 6px; font-size: 14px; }
+        .copyrow { display: flex; gap: 8px; }
+        .copyrow input, .copyrow textarea { flex: 1; padding: 10px; font-size: 13px; border: 1px solid #d9d9d9; border-radius: 4px; background: #f7f8f9; color: #32363a; box-sizing: border-box; font-family: "SF Mono", Consolas, monospace; }
+        .copyrow textarea { min-height: 96px; resize: vertical; }
+        .copybtn { background: #0070f2; color: #fff; border: none; border-radius: 4px; padding: 0 16px; font-size: 14px; font-weight: bold; cursor: pointer; white-space: nowrap; }
+        .copybtn:hover { background: #0056b3; }
+        .copybtn.done { background: #107e3e; }
+        .method { display: inline-block; background: #eef4ff; color: #0070f2; border: 1px solid #cfe0ff; border-radius: 4px; padding: 2px 8px; font-weight: bold; font-size: 12px; margin-bottom: 8px; }
+        ol.steps { margin: 14px 0 0; padding-left: 20px; font-size: 13px; color: #46494d; }
+        ol.steps li { margin-bottom: 6px; }
     </style>
 </head>
 <body>
@@ -41,6 +56,47 @@
         <h2>DocuSign Configuration</h2>
         <p style="color:#107e3e; font-weight:bold;">Setup Complete &#10003;</p>
         <div id="details"></div>
+
+        <!-- SuccessFactors Integration Center webhook -->
+        <div class="webhook">
+            <h3>Trigger from SuccessFactors</h3>
+            <p class="hint">Use this webhook in <strong>SAP SuccessFactors &rarr; Integration Center</strong>
+               to trigger your DocuSign Maestro workflow. It is unique to your organization and uses
+               <strong>your</strong> DocuSign access token.</p>
+
+            <div class="field">
+                <label for="webhookUrl">Webhook URL <span class="method">POST</span></label>
+                <div class="copyrow">
+                    <input type="text" id="webhookUrl" readonly value="Loading..." />
+                    <button class="copybtn" id="copyUrlBtn" onclick="copyUrl()">Copy</button>
+                </div>
+            </div>
+
+            <div class="field">
+                <label for="workflowId">Maestro Workflow ID</label>
+                <div class="copyrow">
+                    <input type="text" id="workflowId" placeholder="Paste your Maestro Workflow ID"
+                           autocomplete="off" oninput="renderBody()" />
+                </div>
+            </div>
+
+            <div class="field">
+                <label for="requestBody">Request Body (JSON)</label>
+                <div class="copyrow">
+                    <textarea id="requestBody" readonly></textarea>
+                    <button class="copybtn" id="copyBodyBtn" onclick="copyBody()">Copy</button>
+                </div>
+            </div>
+
+            <ol class="steps">
+                <li>In Integration Center, create a <strong>More Object Types &rarr; REST</strong> (outbound) integration.</li>
+                <li>Set the destination <strong>REST API URL</strong> to the Webhook URL above and method to <strong>POST</strong>.</li>
+                <li>Set <strong>Content-Type</strong> to <code>application/json</code> (no authentication required).</li>
+                <li>Use the Request Body above, mapping SuccessFactors fields as additional properties if needed.</li>
+                <li>Save &amp; run — the Maestro workflow will be triggered for your account.</li>
+            </ol>
+        </div>
+
         <div class="actions">
             <button class="btn" onclick="window.location.href='/configure.html'">Reconfigure</button>
             <button class="btn secondary" onclick="logout()">Logout</button>
@@ -100,6 +156,70 @@
                 console.error('Failed to load configuration', err);
                 render(null);
             });
+
+        // ---- SuccessFactors webhook URL (tenant-specific) ----
+        const webhookUrlEl = document.getElementById('webhookUrl');
+        const workflowIdEl = document.getElementById('workflowId');
+        const requestBodyEl = document.getElementById('requestBody');
+
+        let webhookBaseUrl = '';
+
+        // Fetch the current tenant id and build the tenant-specific webhook URL.
+        fetch('/api/getTenantId()')
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                const tenant = data && (typeof data.value === 'string' ? data.value : data.value?.value);
+                if (tenant) {
+                    webhookBaseUrl = window.location.origin + '/webhook/tenant/' + tenant + '/trigger';
+                } else {
+                    // Fallback (e.g. provider/non-subscribed access): still show a usable URL shape.
+                    webhookBaseUrl = window.location.origin + '/webhook/tenant/<your-tenant-id>/trigger';
+                }
+                webhookUrlEl.value = webhookBaseUrl;
+                renderBody();
+            })
+            .catch(err => {
+                console.error('Failed to load tenant id', err);
+                webhookUrlEl.value = 'Unable to determine webhook URL';
+            });
+
+        // Builds the copy-ready JSON request body from the entered Workflow ID.
+        function renderBody() {
+            const workflowId = (workflowIdEl.value || '').trim() || '<your-workflow-id>';
+            const body = { workflowId };
+            requestBodyEl.value = JSON.stringify(body, null, 2);
+        }
+
+        function flashCopied(btn) {
+            const original = btn.textContent;
+            btn.textContent = 'Copied!';
+            btn.classList.add('done');
+            setTimeout(() => { btn.textContent = original; btn.classList.remove('done'); }, 1500);
+        }
+
+        function copyToClipboard(text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                return navigator.clipboard.writeText(text);
+            }
+            // Fallback for non-secure contexts
+            return new Promise((resolve) => {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                resolve();
+            });
+        }
+
+        function copyUrl() {
+            copyToClipboard(webhookUrlEl.value).then(() => flashCopied(document.getElementById('copyUrlBtn')));
+        }
+
+        function copyBody() {
+            copyToClipboard(requestBodyEl.value).then(() => flashCopied(document.getElementById('copyBodyBtn')));
+        }
 
         function logout() {
             const buttons = document.querySelectorAll('.actions .btn');

@@ -2,8 +2,7 @@ const cds = require('@sap/cds');
 const axios = require('axios');
 
 module.exports = cds.service.impl(async function () {
-    this.on('exchangeToken', async (req) => {
-        console.log('=== EXCHANGING DOCUSIGN AUTH CODE ===');
+    this.on('exchangeToken', async (req) => {        console.log('=== EXCHANGING DOCUSIGN AUTH CODE ===');
         const authCode = req.data.code;
         const { Tokens, Users, Config } = this.entities;
 
@@ -93,9 +92,15 @@ module.exports = cds.service.impl(async function () {
         }
     });
 
+    this.on('getTenantId', async (req) => {
+        // In an authenticated /api request, req.tenant is the subscriber's
+        // (subaccount) tenant id. The UI uses it to build the tenant-specific
+        // SuccessFactors webhook URL.
+        return req.tenant || (cds.context && cds.context.tenant) || '';
+    });
+
     this.on('logout', async (req) => {
         const { Tokens, Users, Config } = this.entities;
-
         try {
             // Wipe all stored state so a fresh login flow can begin.
             await DELETE.from(Tokens);
