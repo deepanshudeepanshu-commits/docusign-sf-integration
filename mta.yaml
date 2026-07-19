@@ -25,6 +25,7 @@ modules:
           srv-url: ${default-url}
     requires:
       - name: docusign-sf-integration-auth
+      - name: docusign-sf-integration-db
 
   - name: docusign-sf-integration-approuter
     type: approuter.nodejs
@@ -49,6 +50,50 @@ modules:
           url: ~{srv-url}
           forwardAuthToken: true
       - name: docusign-sf-integration-auth
+      - name: mtx-api
+        group: destinations
+        properties:
+          name: mtx-api # must be used in xs-app.json as well
+          url: ~{mtx-url}
+    properties:
+      TENANT_HOST_PATTERN: "^(.*)-${default-uri}"
+    provides:
+      - name: app-api
+        properties:
+          app-protocol: ${protocol}
+          app-uri: ${default-uri}
+
+  - name: docusign-sf-integration-mtx
+    type: nodejs
+    path: gen/mtx/sidecar
+    requires:
+      - name: docusign-sf-integration-auth
+      - name: docusign-sf-integration-registry
+      - name: app-api
+        properties:
+          SUBSCRIPTION_URL: ~{app-protocol}://\${tenant_subdomain}-~{app-uri}
+      - name: docusign-sf-integration-db
+    build-parameters:
+      builder: npm-ci
+    parameters:
+      instances: 1
+      memory: 256M
+      disk-quota: 512M
+    hooks:
+      - name: upgrade-all
+        type: task
+        phases:
+          - blue-green.application.before-start.idle
+          - deploy.application.before-start
+        parameters:
+          name: upgrade
+          memory: 512M # increase as required
+          disk-quota: 768M # increase as required
+          command: cds-mtx upgrade '*'
+    provides:
+      - name: mtx-api
+        properties:
+          mtx-url: ${default-url}
 
 resources:
   - name: docusign-sf-integration-auth
@@ -58,4 +103,38 @@ resources:
       service-plan: application
       config:
         xsappname: docusign-sf-integration-${org}-${space}
-        tenant-mode: dedicated
+        tenant-mode: shared
+        oauth2-configuration:
+          credential-types:
+            - "binding-secret"
+            - "x509"
+          redirect-uris:
+            - https://*~{app-api/app-uri}/**
+      path: ./xs-security.json
+    requires:
+      - name: app-api
+  - name: docusign-sf-integration-registry
+    type: org.cloudfoundry.managed-service
+    requires:
+      - name: mtx-api
+    parameters:
+      service: saas-registry
+      service-plan: application
+      config:
+        xsappname: docusign-sf-integration-${org}-${space}
+        appName: docusign-sf-integration-${org}-${space}
+        displayName: docusign-sf-integration
+        description: A simple CAP project.
+        category: 'Category'
+        appUrls:
+          getDependencies: ~{mtx-api/mtx-url}/-/cds/saas-provisioning/dependencies
+          onSubscription: ~{mtx-api/mtx-url}/-/cds/saas-provisioning/tenant/{tenantId}
+          onSubscriptionAsync: true
+          onUnSubscriptionAsync: true
+          onUpdateDependenciesAsync: true
+          callbackTimeoutMillis: 300000 # Increase if your deployments are taking longer than that
+  - name: docusign-sf-integration-db
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: service-manager
+      service-plan: container

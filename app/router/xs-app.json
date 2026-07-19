@@ -3,6 +3,11 @@
   "welcomeFile": "/index.html",
   "routes": [
     {
+      "source": "^/-/cds/.*",
+      "destination": "mtx-api",
+      "authenticationType": "none"
+    },
+    {
       "source": "^/webhook/(.*)$",
       "target": "/webhook/$1",
       "destination": "srv-api",
