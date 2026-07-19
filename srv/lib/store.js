@@ -60,13 +60,14 @@ async function getServiceToken() {
 async function read() {
     const creds = getCredentials();
     const token = await getServiceToken();
-    const url = `${creds.uri}/destination-configuration/v1/instanceDestinations/${DEST_NAME}`;
+    const url = `${creds.uri}/destination-configuration/v1/instanceDestinations`;
 
     try {
         const response = await axios.get(url, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
-        return response.data;
+        const destinations = response.data || [];
+        return destinations.find(d => d.Name === DEST_NAME) || null;
     } catch (err) {
         if (err.response && err.response.status === 404) {
             return null;

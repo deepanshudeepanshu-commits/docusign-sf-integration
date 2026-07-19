@@ -43,9 +43,13 @@ module.exports = cds.service.impl(async function () {
         try {
             const credentials = Buffer.from(`${config.clientId}:${config.clientSecret}`).toString('base64');
 
+            const fwdHost = req.http?.req?.headers['x-forwarded-host'] || req.http?.req?.headers['host'];
+            const fwdProto = req.http?.req?.headers['x-forwarded-proto'] || 'https';
+            const redirectUri = `${fwdProto}://${fwdHost}/callback.html`;
+
             const tokenResponse = await axios.post(
                 `${env.authServer}/oauth/token`,
-                `grant_type=authorization_code&code=${authCode}`,
+                `grant_type=authorization_code&code=${encodeURIComponent(authCode)}&redirect_uri=${encodeURIComponent(redirectUri)}`,
                 {
                     headers: {
                         'Authorization': `Basic ${credentials}`,
