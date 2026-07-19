@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configure DocuSign</title>
+    <style>
+        body {
+            font-family: "72", Arial, Helvetica, sans-serif;
+            text-align: center;
+            padding-top: 50px;
+            background-color: #f3f4f5;
+            color: #32363a;
+        }
+        .card {
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: inline-block;
+            max-width: 500px;
+            text-align: left;
+        }
+        label { display: block; margin-bottom: 8px; font-weight: bold; }
+        select { width: 100%; padding: 10px; margin-bottom: 20px; border-radius: 4px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
+        .btn { background-color: #0070f2; color: white; padding: 12px 24px; font-size: 16px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; width: 100%;}
+        .btn:hover { background-color: #0056b3; }
+    </style>
+</head>
+<body>
+    <div id="content" class="card">
+        <h2 style="margin-top: 0;">Configuration</h2>
+        <p>Select the DocuSign account to use for Maestro workflows.</p>
+
+        <label for="accountSelect">DocuSign Account</label>
+        <select id="accountSelect"></select>
+
+        <button class="btn" onclick="saveConfiguration()">Save &amp; Continue</button>
+    </div>
+
+    <script>
+        const contentDiv = document.getElementById('content');
+        const accountSelect = document.getElementById('accountSelect');
+
+        // Load the user info stored by callback.html
+        const stored = localStorage.getItem('docusign_userInfo');
+
+        if (!stored) {
+            contentDiv.innerHTML = `
+                <h2 style="color:red; margin-top: 0;">No connection found</h2>
+                <p>Please connect to DocuSign first.</p>
+                <button class="btn" onclick="window.location.href='/index.html'">Go to Start</button>
+            `;
+        } else {
+            const userInfo = JSON.parse(stored);
+            const accounts = userInfo.accounts || [];
+
+            accounts.forEach(acc => {
+                const isDefault = acc.is_default ? " (Default)" : "";
+                const option = document.createElement('option');
+                option.value = acc.account_id;
+                option.textContent = acc.account_name + isDefault;
+                option.dataset.name = acc.account_name;
+                accountSelect.appendChild(option);
+            });
+        }
+
+        function saveConfiguration() {
+            const selectedOption = accountSelect.options[accountSelect.selectedIndex];
+            const selectedAccountId = accountSelect.value;
+            const selectedAccountName = selectedOption ? selectedOption.dataset.name : '';
+            const btn = document.querySelector('.btn');
+
+            btn.innerHTML = "Saving...";
+            btn.disabled = true;
+
+            // Send the selected Account ID to the CAP backend
+            fetch('/api/saveAppConfig', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ accountId: selectedAccountId })
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Persist the selected account so home.html can display it
+                localStorage.setItem('docusign_accountId', selectedAccountId);
+                localStorage.setItem('docusign_accountName', selectedAccountName);
+
+                // Configuration done -> go to the home info page
+                window.location.href = '/home.html';
+            })
+            .catch(error => {
+                alert("Something went wrong saving the account.");
+                btn.innerHTML = "Save & Continue";
+                btn.disabled = false;
+            });
+        }
+    </script>
+</body>
+</html>

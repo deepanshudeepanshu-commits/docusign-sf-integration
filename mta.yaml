@@ -1,0 +1,61 @@
+_schema-version: 3.3.0
+ID: docusign-sf-integration
+version: 1.0.0
+description: "A simple CAP project."
+parameters:
+  enable-parallel-deployments: true
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm ci
+        - npx cds build --production
+modules:
+  - name: docusign-sf-integration-srv
+    type: nodejs
+    path: gen/srv
+    parameters:
+      instances: 1
+      buildpack: nodejs_buildpack
+    build-parameters:
+      builder: npm-ci
+    provides:
+      - name: srv-api
+        properties:
+          srv-url: ${default-url}
+    requires:
+      - name: docusign-sf-integration-auth
+
+  - name: docusign-sf-integration-approuter
+    type: approuter.nodejs
+    path: app/router
+    parameters:
+      keep-existing-routes: true
+      disk-quota: 256M
+      memory: 256M
+    build-parameters:
+      builder: custom
+      commands:
+        - npm ci
+        - mkdir -p resources
+        - cp ../index.html ../callback.html ../configure.html ../home.html resources/
+      ignore:
+        - default-env.json
+    requires:
+      - name: srv-api
+        group: destinations
+        properties:
+          name: srv-api
+          url: ~{srv-url}
+          forwardAuthToken: true
+      - name: docusign-sf-integration-auth
+
+resources:
+  - name: docusign-sf-integration-auth
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      config:
+        xsappname: docusign-sf-integration-${org}-${space}
+        tenant-mode: dedicated

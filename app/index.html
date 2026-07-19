@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SuccessFactors & DocuSign Setup</title>
+    <style>
+        body { font-family: "72", Arial, Helvetica, sans-serif; text-align: center; padding-top: 60px; background-color: #f3f4f5; color: #32363a;}
+        .card { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); display: inline-block; max-width: 520px; text-align: left; }
+        h2 { margin-top: 0; text-align: center; }
+        .intro { text-align: center; color: #6a6d70; }
+        .field { margin-top: 18px; }
+        .field label { display: block; margin-bottom: 6px; font-weight: bold; }
+        .field select, .field input { width: 100%; padding: 10px; font-size: 15px; border: 1px solid #d9d9d9; border-radius: 4px; background-color: white; color: #32363a; box-sizing: border-box; }
+        .btn { background-color: #0070f2; color: white; padding: 12px 24px; font-size: 16px; border: none; border-radius: 4px; cursor: pointer; margin-top: 20px; font-weight: bold; width: 100%; }
+        .btn:hover { background-color: #0056b3; }
+        .btn.secondary { background-color: #fff; color: #0070f2; border: 1px solid #0070f2; }
+        .btn.secondary:hover { background-color: #eaf3ff; }
+        .step { border-top: 1px solid #eee; margin-top: 24px; padding-top: 8px; }
+        .step-title { font-weight: bold; margin-bottom: 4px; }
+        .hint { font-size: 13px; color: #6a6d70; }
+        #status { margin-top: 14px; color: #6a6d70; text-align: center; }
+        .disabled { opacity: 0.5; pointer-events: none; }
+        code { word-break: break-all; background: #f3f4f5; padding: 2px 4px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>DocuSign For SAP</h2>
+        <p class="intro">Connect your DocuSign account in three steps.</p>
+
+        <!-- Step 1: choose environment & open the OAuth registry -->
+        <div class="step">
+            <div class="step-title">1. Generate credentials</div>
+            <div class="field">
+                <label for="environment">DocuSign Environment</label>
+                <select id="environment">
+                    <option value="stage">Stage</option>
+                    <option value="demo">Demo</option>
+                    <option value="production">Production</option>
+                </select>
+            </div>
+            <button class="btn secondary" id="registryBtn" onclick="openRegistry()">Open OAuth Registry</button>
+        </div>
+
+        <!-- Step 2: paste + save credentials -->
+        <div class="step">
+            <div class="step-title">2. Save credentials</div>
+            <div class="field">
+                <label for="clientId">Client ID</label>
+                <input type="text" id="clientId" placeholder="Paste your Client ID" autocomplete="off" />
+            </div>
+            <div class="field">
+                <label for="clientSecret">Client Secret</label>
+                <input type="password" id="clientSecret" placeholder="Paste your Client Secret" autocomplete="off" />
+            </div>
+            <button class="btn" id="saveBtn" onclick="saveCredentials()">Save Credentials</button>
+        </div>
+
+        <!-- Step 3: login (authorization code grant) -->
+        <div class="step" id="loginStep">
+            <div class="step-title">3. Login</div>
+            <button class="btn disabled" id="loginBtn" onclick="startLogin()">Login with DocuSign</button>
+        </div>
+
+        <p id="status"></p>
+    </div>
+
+    <script>
+        // Registry (app) URLs where the user generates client id/secret.
+        const registryUrls = {
+            stage: 'https://apps-s.docusign.com/oauth-registry?integrationType=sap',
+            demo: 'https://apps-d.docusign.com/oauth-registry?integrationType=sap',
+            production: 'https://apps.docusign.com/oauth-registry?integrationType=sap'
+        };
+
+        // OAuth auth servers used for the authorization-code grant flow.
+        const authServers = {
+            stage: 'https://account-s.docusign.com',
+            demo: 'https://account-d.docusign.com',
+            production: 'https://account.docusign.com'
+        };
+
+        // Redirect URI DocuSign must have registered for the auth-code flow.
+        const redirectUri = window.location.origin + '/callback.html';
+
+        const statusEl = document.getElementById('status');
+        const loginBtn = document.getElementById('loginBtn');
+
+        // Opens the OAuth registry in a new tab so the user can generate credentials.
+        // We append our callback URL as `redirect_uri` so the registry can pre-register
+        // it on the new integration (this is the same URI used by the auth-code flow).
+        function openRegistry() {
+            const environment = document.getElementById('environment').value;
+            const registryUrl = registryUrls[environment]
+                + '&redirect_uri=' + encodeURIComponent(redirectUri);
+            window.open(registryUrl, '_blank');
+        }
+
+        // Persists environment, authServer and the pasted client credentials.
+        async function saveCredentials() {
+            const environment = document.getElementById('environment').value;
+            const authServer = authServers[environment];
+            const clientId = document.getElementById('clientId').value.trim();
+            const clientSecret = document.getElementById('clientSecret').value.trim();
+            const saveBtn = document.getElementById('saveBtn');
+
+            if (!clientId || !clientSecret) {
+                statusEl.textContent = 'Please paste both Client ID and Client Secret.';
+                return;
+            }
+
+            saveBtn.disabled = true;
+            statusEl.textContent = 'Saving credentials...';
+
+            try {
+                await fetch('/api/saveAppConfig', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ environment, authServer, clientId, clientSecret })
+                });
+                statusEl.textContent = 'Credentials saved. You can now log in.';
+                enableLogin();
+            } catch (e) {
+                console.error('Failed to save credentials', e);
+                statusEl.textContent = 'Failed to save credentials. Please try again.';
+            } finally {
+                saveBtn.disabled = false;
+            }
+        }
+
+        function enableLogin() {
+            loginBtn.classList.remove('disabled');
+        }
+
+        // Starts the authorization-code grant flow by redirecting to DocuSign.
+        async function startLogin() {
+            const environment = document.getElementById('environment').value;
+            const authServer = authServers[environment];
+            const clientId = document.getElementById('clientId').value.trim();
+
+            if (!clientId) {
+                statusEl.textContent = 'Missing Client ID. Please save your credentials first.';
+                return;
+            }
+
+            const scope = encodeURIComponent('signature aow_manage');
+            const authUrl = authServer + '/oauth/auth?response_type=code&scope=' + scope
+                + '&client_id=' + encodeURIComponent(clientId)
+                + '&redirect_uri=' + encodeURIComponent(redirectUri);
+            window.location.href = authUrl;
+        }
+
+        Promise.all([
+            fetch("/api/Config('1')").then(res => res.ok ? res.json() : null).catch(() => null),
+            fetch('/api/Tokens').then(res => res.ok ? res.json() : null).catch(() => null)
+        ]).then(([config, tokensResp]) => {
+            const tokens = tokensResp && tokensResp.value && tokensResp.value[0];
+            const hasTokens = !!(tokens && tokens.accessToken && tokens.refreshToken);
+            const hasCredentials = !!(config && config.clientId && config.clientSecret);
+
+            if (hasTokens && hasCredentials) {
+                window.location.replace(config.accountId ? '/home.html' : '/configure.html');
+                return;
+            }
+
+            if (!config) return;
+            if (config.environment) document.getElementById('environment').value = config.environment;
+            if (config.clientId) document.getElementById('clientId').value = config.clientId;
+            if (config.clientSecret) document.getElementById('clientSecret').value = config.clientSecret;
+            if (config.clientId && config.clientSecret) enableLogin();
+        });
+    </script>
+</body>
+</html>
