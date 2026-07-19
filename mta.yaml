@@ -26,7 +26,6 @@ modules:
         properties:
           srv-url: ${default-url}
     requires:
-      - name: docusign-sf-integration-auth
       - name: docusign-sf-integration-destination
 
   # App Router: serves the setup UI and routes /api (protected) + /webhook (public).
@@ -50,33 +49,8 @@ modules:
         properties:
           name: srv-api
           url: ~{srv-url}
-          forwardAuthToken: true
-      - name: docusign-sf-integration-auth
-    provides:
-      - name: app-api
-        properties:
-          app-protocol: ${protocol}
-          app-uri: ${default-uri}
-
+          forwardAuthToken: false
 resources:
-  # XSUAA secures the setup UI (single-tenant / dedicated mode).
-  - name: docusign-sf-integration-auth
-    type: org.cloudfoundry.managed-service
-    parameters:
-      service: xsuaa
-      service-plan: application
-      config:
-        xsappname: docusign-sf-integration-${org}-${space}
-        oauth2-configuration:
-          credential-types:
-            - "binding-secret"
-            - "x509"
-          redirect-uris:
-            - https://*~{app-api/app-uri}/**
-      path: ./xs-security.json
-    requires:
-      - name: app-api
-
   # Destination Service: the app's persistent, secure store (replaces HANA).
   - name: docusign-sf-integration-destination
     type: org.cloudfoundry.managed-service
