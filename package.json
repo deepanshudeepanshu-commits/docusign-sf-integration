@@ -3,14 +3,23 @@
   "version": "1.0.0",
   "dependencies": {
     "@sap/cds": "^9",
+    "@sap/xssec": "^4",
     "axios": "^1.18.1",
-    "express": "^4"
+    "express": "^4",
+    "passport": "^0.7"
   },
   "devDependencies": {
     "@sap/cds-dk": "^9"
   },
   "scripts": {
     "start": "cds-serve"
+  },
+  "cds": {
+    "requires": {
+      "auth": {
+        "kind": "dummy"
+      }
+    }
   },
   "private": true
 }

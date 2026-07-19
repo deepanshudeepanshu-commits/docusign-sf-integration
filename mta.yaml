@@ -27,6 +27,7 @@ modules:
           srv-url: ${default-url}
     requires:
       - name: docusign-sf-integration-destination
+      - name: docusign-sf-integration-auth
 
   # App Router: serves the setup UI and routes /api (protected) + /webhook (public).
   - name: docusign-sf-integration-approuter
@@ -57,3 +58,9 @@ resources:
     parameters:
       service: destination
       service-plan: lite
+  - name: docusign-sf-integration-auth
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: xs-security.json
