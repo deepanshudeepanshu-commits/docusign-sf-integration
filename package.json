@@ -15,10 +15,6 @@
   },
   "private": true,
   "cds": {
-    "requires": {
-      "[production]": {
-        "auth": "xsuaa"
-      }
-    }
+    "requires": {}
   }
 }

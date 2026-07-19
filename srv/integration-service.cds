@@ -1,3 +1,4 @@
+@open
 service IntegrationService @(path: '/api') {
 
     // Exchanges the DocuSign authorization code for tokens (auth-code grant),
