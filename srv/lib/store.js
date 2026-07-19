@@ -109,10 +109,9 @@ async function write(patch) {
     };
 
     if (existing) {
-        await axios.put(`${baseUrl}/${DEST_NAME}`, dest, { headers });
-    } else {
-        await axios.post(baseUrl, dest, { headers });
+        await axios.delete(`${baseUrl}/${DEST_NAME}`, { headers });
     }
+    await axios.post(baseUrl, dest, { headers });
 }
 
 /**
