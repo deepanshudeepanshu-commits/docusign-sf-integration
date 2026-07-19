@@ -4,3 +4,6 @@ mta_archives/
 *.mtar
 .docusign-sf-integration_mta_build_tmp/
 *.sqlite
+
+# added by cds
+.cdsrc-private.json

@@ -6,9 +6,6 @@
     "@sap/cds-mtxs": "^3",
     "@sap/xssec": "^4"
   },
-  "devDependencies": {
-    "@cap-js/sqlite": "^2"
-  },
   "engines": {
     "node": ">=20"
   },

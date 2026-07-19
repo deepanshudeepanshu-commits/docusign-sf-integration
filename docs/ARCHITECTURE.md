@@ -95,8 +95,8 @@ Intentionally unauthenticated. Kept as a **separate service** because CAP enforc
 |---|---|---|
 | `triggerMaestroWorkflow(data)` | Action | Called by SuccessFactors on any event. `data` is an open object: `workflowId` is required, every other property is forwarded to the Maestro workflow as an input variable. Refreshes the access token, then triggers the workflow for the stored account. |
 
-### 3.3 Persistence (In-memory SQLite)
-Deployed via `srv/server.js` on the `served` event (see [§7 Data Persistence](#7-data-persistence-model)).
+### 3.3 Persistence (SAP HANA — HDI containers)
+Each subscribed tenant gets its own isolated HDI container, provisioned automatically by the MTX sidecar on subscription (see [§7 Data Persistence](#7-data-persistence-model)).
 
 | Entity | Key fields | Purpose |
 |---|---|---|
@@ -248,10 +248,11 @@ Build pipeline: `npm ci` → `npx cds build --production` → package modules �
 
 ## 7. Data Persistence Model
 
-- The `db` is configured as **in-memory SQLite** (`:memory:`).
-- On startup, `srv/server.js` (on the `served` lifecycle event) deploys the CDS model into the in-memory DB when running the production profile, creating the tables.
-- **Consequence:** all state (tokens, user info, config) is **lost on app restart or redeploy**. The admin must re-run the DocuSign login after each restart.
-- **Recommendation for production:** switch the `db` binding to **SAP HANA Cloud** (persistent) so tokens and configuration survive restarts and can support refresh-token rotation.
+- The `db` is configured as **SAP HANA** (`kind: hana`) in all profiles — there is no SQLite anymore.
+- **Production:** the MTX sidecar provisions one **isolated HDI container per subscribed tenant**; schema is deployed automatically on subscription.
+- **Local/hybrid development:** the runtime binds to a dedicated HDI container via `cds bind`, and the schema is deployed with `cds deploy --to hana --profile hybrid`. Run the app with `cds watch --profile hybrid`.
+- **Consequence:** all state (tokens, user info, config) is **persistent** and survives app restarts and redeploys, and supports refresh-token rotation.
+- No custom `srv/server.js` bootstrap is needed; CAP's default server is used.
 
 ---
 
