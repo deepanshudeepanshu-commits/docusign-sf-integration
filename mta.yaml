@@ -32,6 +32,10 @@ modules:
     path: app/router
     parameters:
       keep-existing-routes: true
+      # Short custom host so tenant subscription URLs
+      # (<tenant-subdomain>-<host>.cfapps...) stay within the 63-char DNS
+      # label limit. The default host was too long, breaking tenant URLs.
+      host: dsf-b67584fctrial
       disk-quota: 256M
       memory: 256M
     build-parameters:
