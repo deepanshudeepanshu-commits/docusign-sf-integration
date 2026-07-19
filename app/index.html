@@ -97,10 +97,11 @@
             window.open(registryUrl, '_blank');
         }
 
-        // Persists environment, authServer and the pasted client credentials.
+        // Persists environment and the pasted client credentials. The auth
+        // server is derived from `environment` on the backend, so we no longer
+        // send it.
         async function saveCredentials() {
             const environment = document.getElementById('environment').value;
-            const authServer = authServers[environment];
             const clientId = document.getElementById('clientId').value.trim();
             const clientSecret = document.getElementById('clientSecret').value.trim();
             const saveBtn = document.getElementById('saveBtn');
@@ -117,7 +118,7 @@
                 await fetch('/api/saveAppConfig', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ environment, authServer, clientId, clientSecret })
+                    body: JSON.stringify({ environment, clientId, clientSecret })
                 });
                 statusEl.textContent = 'Credentials saved. You can now log in.';
                 enableLogin();
@@ -151,25 +152,24 @@
             window.location.href = authUrl;
         }
 
-        Promise.all([
-            fetch("/api/Config('1')").then(res => res.ok ? res.json() : null).catch(() => null),
-            fetch('/api/Tokens').then(res => res.ok ? res.json() : null).catch(() => null)
-        ]).then(([config, tokensResp]) => {
-            const tokens = tokensResp && tokensResp.value && tokensResp.value[0];
-            const hasTokens = !!(tokens && tokens.accessToken && tokens.refreshToken);
-            const hasCredentials = !!(config && config.clientId && config.clientSecret);
+        // Ask the backend for the current setup state and route / prefill
+        // accordingly. getState() returns a JSON string in `.value`.
+        fetch('/api/getState()')
+            .then(res => res.ok ? res.json() : null)
+            .then(resp => {
+                const state = resp && resp.value ? JSON.parse(resp.value) : null;
+                if (!state) return;
 
-            if (hasTokens && hasCredentials) {
-                window.location.replace(config.accountId ? '/home.html' : '/configure.html');
-                return;
-            }
+                if (state.authenticated && state.configured) {
+                    window.location.replace(state.accountSelected ? '/home.html' : '/configure.html');
+                    return;
+                }
 
-            if (!config) return;
-            if (config.environment) document.getElementById('environment').value = config.environment;
-            if (config.clientId) document.getElementById('clientId').value = config.clientId;
-            if (config.clientSecret) document.getElementById('clientSecret').value = config.clientSecret;
-            if (config.clientId && config.clientSecret) enableLogin();
-        });
+                if (state.environment) document.getElementById('environment').value = state.environment;
+                if (state.clientId) document.getElementById('clientId').value = state.clientId;
+                if (state.configured) enableLogin();
+            })
+            .catch(() => { /* first-time setup: stay on the login page */ });
     </script>
 </body>
 </html>

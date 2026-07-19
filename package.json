@@ -2,11 +2,10 @@
   "name": "docusign-sf-integration",
   "version": "1.0.0",
   "dependencies": {
-    "@cap-js/hana": "^2",
     "@sap/cds": "^9",
-    "@sap/cds-mtxs": "^3",
     "@sap/xssec": "^4",
-    "axios": "^1.18.1"
+    "axios": "^1.18.1",
+    "express": "^4"
   },
   "devDependencies": {
     "@sap/cds-dk": "^9"
@@ -17,17 +16,9 @@
   "private": true,
   "cds": {
     "requires": {
-      "db": {
-        "kind": "hana"
-      },
       "[production]": {
-        "auth": "xsuaa",
-        "multitenancy": true
-      },
-      "[with-mtx]": {
-        "multitenancy": true
+        "auth": "xsuaa"
       }
-    },
-    "profile": "with-mtx-sidecar"
+    }
   }
 }

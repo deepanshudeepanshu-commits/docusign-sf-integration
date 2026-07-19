@@ -1,24 +1,25 @@
-using { my.docusign.integration as my } from '../db/schema';
-
 service IntegrationService @(path: '/api') {
-    entity Tokens as projection on my.DocuSignTokens;
-    entity Users as projection on my.UserInfo;
-    entity Config as projection on my.AppConfig;
 
+    // Exchanges the DocuSign authorization code for tokens (auth-code grant),
+    // stores them in the Destination Service, and returns the live user profile
+    // (fetched from DocuSign's /oauth/userinfo) so the UI can display it.
     @readonly
     function exchangeToken(code: String) returns LargeString;
 
-    // Returns the current tenant (subscriber subaccount) ID, so the UI can
-    // build the tenant-specific SuccessFactors webhook URL.
-    function getTenantId() returns String;
+    // Returns a small JSON status object used by the UI to decide routing and
+    // to prefill the setup form. Never returns the client secret or tokens.
+    @readonly
+    function getState() returns LargeString;
 
+    // Saves any subset of the configuration (environment, credentials, account)
+    // into the Destination Service.
     action saveAppConfig(
         accountId: String,
         environment: String,
-        authServer: String,
         clientId: String,
         clientSecret: String
     ) returns String;
 
+    // Clears all stored state (deletes the destination).
     action logout() returns String;
 }

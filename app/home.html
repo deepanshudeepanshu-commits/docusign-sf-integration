@@ -61,7 +61,7 @@
         <div class="webhook">
             <h3>Trigger from SuccessFactors</h3>
             <p class="hint">Use this webhook in <strong>SAP SuccessFactors &rarr; Integration Center</strong>
-               to trigger your DocuSign Maestro workflow. It is unique to your organization and uses
+               to trigger your DocuSign Maestro workflow. It uses
                <strong>your</strong> DocuSign access token.</p>
 
             <div class="field">
@@ -145,43 +145,27 @@
             `;
         }
 
-        // Read the persisted configuration (environment, accountId)
-        // from the backend AppConfig entity.
-        fetch("/api/Config('1')")
-            .then(response => response.json())
-            .then(config => {
-                render(config.environment);
+        // Read the persisted configuration (environment) from the backend.
+        fetch('/api/getState()')
+            .then(response => response.ok ? response.json() : null)
+            .then(resp => {
+                const state = resp && resp.value ? JSON.parse(resp.value) : {};
+                render(state.environment);
             })
             .catch(err => {
                 console.error('Failed to load configuration', err);
                 render(null);
             });
 
-        // ---- SuccessFactors webhook URL (tenant-specific) ----
+        // ---- SuccessFactors webhook URL ----
         const webhookUrlEl = document.getElementById('webhookUrl');
         const workflowIdEl = document.getElementById('workflowId');
         const requestBodyEl = document.getElementById('requestBody');
 
-        let webhookBaseUrl = '';
-
-        // Fetch the current tenant id and build the tenant-specific webhook URL.
-        fetch('/api/getTenantId()')
-            .then(res => res.ok ? res.json() : null)
-            .then(data => {
-                const tenant = data && (typeof data.value === 'string' ? data.value : data.value?.value);
-                if (tenant) {
-                    webhookBaseUrl = window.location.origin + '/webhook/tenant/' + tenant + '/trigger';
-                } else {
-                    // Fallback (e.g. provider/non-subscribed access): still show a usable URL shape.
-                    webhookBaseUrl = window.location.origin + '/webhook/tenant/<your-tenant-id>/trigger';
-                }
-                webhookUrlEl.value = webhookBaseUrl;
-                renderBody();
-            })
-            .catch(err => {
-                console.error('Failed to load tenant id', err);
-                webhookUrlEl.value = 'Unable to determine webhook URL';
-            });
+        // Single-tenant deployment: one fixed webhook endpoint.
+        const webhookBaseUrl = window.location.origin + '/webhook/trigger';
+        webhookUrlEl.value = webhookBaseUrl;
+        renderBody();
 
         // Builds the copy-ready JSON request body from the entered Workflow ID.
         function renderBody() {

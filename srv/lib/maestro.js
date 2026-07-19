@@ -1,8 +1,8 @@
-const cds = require('@sap/cds');
-const axios = require('axios');
+'use strict';
 
-const TOKENS = 'my.docusign.integration.DocuSignTokens';
-const CONFIG = 'my.docusign.integration.AppConfig';
+const axios = require('axios');
+const store = require('./store');
+const { resolveEnv } = require('./environments');
 
 /**
  * Small helper to create an Error carrying an HTTP status code so callers
@@ -17,31 +17,27 @@ function httpError(code, message) {
 
 /**
  * Uses the stored refresh token to obtain a fresh DocuSign access token via the
- * OAuth `refresh_token` grant, persists the new token set, and returns the
- * fresh access token.
+ * OAuth `refresh_token` grant, persists the (possibly rotated) token set back
+ * into the Destination Service, and returns the fresh access token.
  *
- * All DB access uses the ambient CDS transaction/context, so when this runs
- * inside `cds.tx({ tenant }, ...)` it reads/writes the correct tenant's HDI
- * container.
- *
- * Throws if credentials/refresh token are missing or DocuSign rejects the call.
+ * DocuSign rotates refresh tokens, so we always persist the newest one.
  */
-async function refreshAccessToken(tokenRecord, configRecord) {
-    if (!tokenRecord.refreshToken) {
+async function refreshAccessToken(config) {
+    if (!config.refreshToken) {
         throw new Error('No refresh token stored. Please log in again.');
     }
-    if (!configRecord.clientId || !configRecord.clientSecret) {
+    if (!config.clientId || !config.clientSecret) {
         throw new Error('Missing client credentials. Please complete UI setup.');
     }
 
-    const authServer = configRecord.authServer || 'https://account-d.docusign.com';
-    const tokenUrl = `${authServer}/oauth/token`;
-    const credentials = Buffer.from(`${configRecord.clientId}:${configRecord.clientSecret}`).toString('base64');
+    const env = resolveEnv(config.environment);
+    const tokenUrl = `${env.authServer}/oauth/token`;
+    const credentials = Buffer.from(`${config.clientId}:${config.clientSecret}`).toString('base64');
 
     console.log('=== REFRESHING DOCUSIGN ACCESS TOKEN ===');
     const tokenResponse = await axios.post(
         tokenUrl,
-        `grant_type=refresh_token&refresh_token=${encodeURIComponent(tokenRecord.refreshToken)}`,
+        `grant_type=refresh_token&refresh_token=${encodeURIComponent(config.refreshToken)}`,
         {
             headers: {
                 'Authorization': `Basic ${credentials}`,
@@ -52,15 +48,13 @@ async function refreshAccessToken(tokenRecord, configRecord) {
 
     const accessToken = tokenResponse.data.access_token;
     // DocuSign may return a rotated refresh token; keep the new one if present.
-    const refreshToken = tokenResponse.data.refresh_token || tokenRecord.refreshToken;
+    const refreshToken = tokenResponse.data.refresh_token || config.refreshToken;
     const expiresIn = tokenResponse.data.expires_in;
     const expiresAt = expiresIn
         ? new Date(Date.now() + Number(expiresIn) * 1000).toISOString()
-        : null;
+        : '';
 
-    await UPDATE(TOKENS)
-        .set({ accessToken, refreshToken, expiresAt })
-        .where({ ID: tokenRecord.ID });
+    await store.write({ accessToken, refreshToken, expiresAt });
 
     console.log('Access token refreshed. New expiry:', expiresAt);
     return accessToken;
@@ -68,15 +62,10 @@ async function refreshAccessToken(tokenRecord, configRecord) {
 
 /**
  * Core business logic: triggers a DocuSign Maestro workflow using the tokens
- * and configuration stored for the CURRENT tenant context.
+ * and configuration stored for this (single-tenant) deployment.
  *
  * `payload` must contain `workflowId`; any other properties are forwarded to
  * the Maestro workflow as input variables.
- *
- * IMPORTANT (multitenancy): this function relies entirely on the ambient CDS
- * context to resolve which tenant's data to use. Call it inside
- * `cds.tx({ tenant }, () => triggerMaestro(payload))` for inbound
- * (unauthenticated) webhooks so it targets the correct subscriber container.
  */
 async function triggerMaestro(payload) {
     const { workflowId, ...inputData } = payload || {};
@@ -85,14 +74,13 @@ async function triggerMaestro(payload) {
         throw httpError(400, 'Missing workflowId in the payload.');
     }
 
-    const tokenRecord = await SELECT.one.from(TOKENS);
-    const configRecord = await SELECT.one.from(CONFIG).where({ ID: '1' });
+    const config = await store.read();
 
-    if (!tokenRecord) {
-        throw httpError(400, 'App not authenticated. Missing DocuSign tokens.');
+    if (!config || !config.refreshToken) {
+        throw httpError(400, 'App not authenticated. Please connect DocuSign in the UI.');
     }
 
-    if (!configRecord || !configRecord.accountId) {
+    if (!config.accountId) {
         throw httpError(400, 'App not configured. Missing selected DocuSign Account ID. Please complete UI setup.');
     }
 
@@ -100,7 +88,7 @@ async function triggerMaestro(payload) {
     // triggering, so we never rely on a possibly-expired stored token.
     let accessToken;
     try {
-        accessToken = await refreshAccessToken(tokenRecord, configRecord);
+        accessToken = await refreshAccessToken(config);
     } catch (refreshErr) {
         console.error('Token refresh failed:', refreshErr.response?.data || refreshErr.message);
         throw httpError(401, 'DocuSign session expired and could not be refreshed. Please log in again.');
@@ -126,14 +114,8 @@ async function triggerMaestro(payload) {
         inputVariables
     };
 
-    const partnerHosts = {
-        stage: 'https://services.stage.docusign.net',
-        demo: 'https://services.demo.docusign.net',
-        production: 'https://services.docusign.net'
-    };
-    const partnerHost = partnerHosts[configRecord.environment] || partnerHosts.demo;
-
-    const docusignUrl = `${partnerHost}/partner-integrations/v1.0/accounts/${configRecord.accountId}/maestro-workflows/trigger/${workflowId}`;
+    const env = resolveEnv(config.environment);
+    const docusignUrl = `${env.partnerHost}/partner-integrations/v1.0/accounts/${config.accountId}/maestro-workflows/trigger/${workflowId}`;
 
     try {
         const response = await axios.post(docusignUrl, maestroPayload, {
