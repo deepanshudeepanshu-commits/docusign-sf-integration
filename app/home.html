@@ -106,20 +106,8 @@
     <script>
         const detailsDiv = document.getElementById('details');
 
-        // Account name and user profile are not part of AppConfig, so we still
-        // read those from what callback.html / configure.html stored locally.
-        const accountName = localStorage.getItem('docusign_accountName') || '-';
-
-        let userName = '-';
-        let userEmail = '-';
-        const storedUser = localStorage.getItem('docusign_userInfo');
-        if (storedUser) {
-            const userInfo = JSON.parse(storedUser);
-            userName = userInfo.name || '-';
-            userEmail = userInfo.email || '-';
-        }
-
-        function render(environment) {
+        function render(state) {
+            const environment = state.environment || '';
             const envLabel = environment
                 ? environment.charAt(0).toUpperCase() + environment.slice(1)
                 : 'Unknown';
@@ -128,11 +116,11 @@
             detailsDiv.innerHTML = `
                 <div class="row">
                     <span class="label">User</span>
-                    <span class="value">${userName}</span>
+                    <span class="value">${state.userName || '-'}</span>
                 </div>
                 <div class="row">
                     <span class="label">Email</span>
-                    <span class="value">${userEmail}</span>
+                    <span class="value">${state.userEmail || '-'}</span>
                 </div>
                 <div class="row">
                     <span class="label">Environment</span>
@@ -140,21 +128,20 @@
                 </div>
                 <div class="row">
                     <span class="label">Selected Account</span>
-                    <span class="value">${accountName}</span>
+                    <span class="value">${state.accountName || '-'}</span>
                 </div>
             `;
         }
 
-        // Read the persisted configuration (environment) from the backend.
         fetch('/api/getState()')
             .then(response => response.ok ? response.json() : null)
             .then(resp => {
                 const state = resp && resp.value ? JSON.parse(resp.value) : {};
-                render(state.environment);
+                render(state);
             })
             .catch(err => {
                 console.error('Failed to load configuration', err);
-                render(null);
+                render({});
             });
 
         // ---- SuccessFactors webhook URL ----

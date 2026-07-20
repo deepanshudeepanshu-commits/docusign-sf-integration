@@ -74,11 +74,11 @@
             btn.innerHTML = "Saving...";
             btn.disabled = true;
 
-            // Send the selected Account ID to the CAP backend
+            // Send the selected Account ID + name to the CAP backend
             fetch('/api/saveAppConfig', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ accountId: selectedAccountId })
+                body: JSON.stringify({ accountId: selectedAccountId, accountName: selectedAccountName })
             })
             .then(response => response.json())
             .then(data => {

@@ -16,6 +16,7 @@ service IntegrationService @(path: '/api') {
     // into the Destination Service.
     action saveAppConfig(
         accountId: String,
+        accountName: String,
         environment: String,
         clientId: String,
         clientSecret: String

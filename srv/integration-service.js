@@ -6,12 +6,13 @@ const { resolveEnv } = require('./lib/environments');
 module.exports = cds.service.impl(async function () {
 
     this.on('saveAppConfig', async (req) => {
-        const { accountId, environment, clientId, clientSecret } = req.data;
+        const { accountId, accountName, environment, clientId, clientSecret } = req.data;
 
         // Only persist fields that were actually provided, so a partial update
         // (e.g. only the account) doesn't wipe existing values.
         const patch = {};
         if (accountId !== undefined) patch.accountId = accountId;
+        if (accountName !== undefined) patch.accountName = accountName;
         if (environment !== undefined) {
             patch.environment = environment;
             // Keep the destination URL meaningful for the chosen environment.
@@ -73,7 +74,13 @@ module.exports = cds.service.impl(async function () {
                 headers: { 'Authorization': `Bearer ${accessToken}` }
             });
 
-            return JSON.stringify(userInfoResponse.data);
+            const userInfo = userInfoResponse.data;
+            await store.write({
+                userName: userInfo.name || '',
+                userEmail: userInfo.email || ''
+            });
+
+            return JSON.stringify(userInfo);
         } catch (error) {
             console.error('Token Exchange Error:', error.response?.data || error.message);
             return req.reject(500, 'Failed to exchange token or fetch user info.');
@@ -88,6 +95,9 @@ module.exports = cds.service.impl(async function () {
             accountSelected: !!config.accountId,
             environment: config.environment || '',
             accountId: config.accountId || '',
+            accountName: config.accountName || '',
+            userName: config.userName || '',
+            userEmail: config.userEmail || '',
             // clientId is safe to expose (needed by the UI to build the login
             // URL); the client secret and tokens are intentionally NOT returned.
             clientId: config.clientId || ''
